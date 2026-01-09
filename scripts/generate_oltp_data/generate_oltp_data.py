@@ -173,6 +173,14 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
         pickup_zone_id = random.choice(zone_ids)
         dropoff_zone_id = random.choice(zone_ids)
 
+        estimated_distance = round(random.uniform(1, 30), 2)
+        raw_actual_distance = round(estimated_distance + random.uniform(-2, 5),2)
+        actual_distance = (
+            None if raw_actual_distance < 0
+            else maybe_null(raw_actual_distance)
+        )
+        fare_amount = maybe_null(round(random.uniform(5, 80), 2))
+
         cur.execute(
             """
             INSERT INTO mobility.trips (
@@ -186,10 +194,11 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
                 accepted_at,
                 started_at,
                 ended_at,
+                estimated_distance_km,
                 actual_distance_km,
                 fare_amount
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING trip_id
             """,
             (
@@ -203,8 +212,9 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
                 accepted_at,
                 started_at,
                 maybe_null(ended_at),
-                maybe_null(round(random.uniform(1, 30), 2)),
-                maybe_null(round(random.uniform(5, 80), 2)),
+                estimated_distance,
+                actual_distance,
+                fare_amount,
             ),
         )
 
@@ -284,7 +294,10 @@ def main():
             zone_ids,
         )
         insert_payments(cur, trip_ids)
+        logging.info("Payments inserted")
         insert_ratings(cur, trip_ids)
+        logging.info("Ratings inserted")
+
 
         conn.commit()
         logging.info("OLTP data generation completed successfully")
