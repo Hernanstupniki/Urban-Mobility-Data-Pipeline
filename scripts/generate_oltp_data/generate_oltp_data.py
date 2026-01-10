@@ -259,6 +259,56 @@ def insert_ratings(cur, trip_ids):
             (random.randint(1, 5), trip_id),
         )
 
+def update_trip_statuses(cur, max_updates=3000):
+    logging.info("Updating existing trips statuses...")
+
+    cur.execute("""
+        SELECT trip_id, started_at, estimated_distance_km
+        FROM mobility.trips
+        WHERE status IN ('requested','accepted','started')
+        ORDER BY random()
+        LIMIT %s
+    """, (max_updates,))
+
+    trips = cur.fetchall()
+
+    for trip_id, started_at, estimated_distance in trips:
+        new_status = random.choice(["completed", "canceled"])
+
+        if new_status == "completed":
+            ended_at = started_at + timedelta(minutes=random.randint(5, 40)) if started_at else datetime.now()
+            raw_actual = float(estimated_distance) + random.uniform(-2, 5) if estimated_distance else None
+            actual_distance = None if raw_actual and raw_actual < 0 else raw_actual
+
+            cur.execute("""
+                UPDATE mobility.trips
+                SET status = %s,
+                    ended_at = %s,
+                    actual_distance_km = %s
+                WHERE trip_id = %s
+            """, (
+                new_status,
+                ended_at,
+                actual_distance,
+                trip_id
+            ))
+
+        else:  # canceled
+            cur.execute("""
+                UPDATE mobility.trips
+                SET status = %s,
+                    canceled_at = now(),
+                    cancel_reason = %s
+                WHERE trip_id = %s
+            """, (
+                new_status,
+                random.choice(["passenger","driver","system"]),
+                trip_id
+            ))
+
+    logging.info(f"Updated {len(trips)} trips")
+
+
 
 # ============================================================
 # Main
@@ -298,6 +348,7 @@ def main():
         insert_ratings(cur, trip_ids)
         logging.info("Ratings inserted")
 
+        update_trip_statuses(cur, max_updates=3000)
 
         conn.commit()
         logging.info("OLTP data generation completed successfully")
