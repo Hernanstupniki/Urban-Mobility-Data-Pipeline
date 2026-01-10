@@ -1,10 +1,10 @@
 import os
 from datetime import datetime
-
 import uuid
 import psycopg2
+
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, current_timestamp, max as spark_max
+from pyspark.sql.functions import (col, lit, current_timestamp, max as spark_max, to_date)
 
 # Config
 JOB_NAME = "trips_oltp_to_bronze"
@@ -17,9 +17,10 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 JDBC_URL = f"jdbc:postgresql://{DB_HOST}:5432/{DB_NAME}"
 
 ENV = os.getenv("ENV", "dev")
-RAW_BASE_PATH = "data/{ENV}/bronze/trips"
+BRONZE_BASE_PATH = f"data/{ENV}/bronze/trips"
 
 
+# ETL control upsert
 def upsert_etl_control(job_name, last_loaded_ts, status):
     conn = psycopg2.connect(
         host=DB_HOST,
@@ -55,17 +56,22 @@ def main():
     spark = (
         SparkSession.builder
         .appName(JOB_NAME)
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        )
         .getOrCreate()
     )
 
     spark.sparkContext.setLogLevel("WARN")
 
-    # Spark performance
+    # DEV / WSL tuning
     spark.conf.set("spark.sql.shuffle.partitions", "4")
     spark.conf.set("spark.default.parallelism", "4")
     spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
 
-    # Read etl_control (watermark)
+    # Read watermark
     etl_control_df = (
         spark.read
         .format("jdbc")
@@ -82,12 +88,11 @@ def main():
         last_loaded_ts = datetime(1970, 1, 1)
     else:
         last_loaded_ts = etl_control_df.select("last_loaded_ts").collect()[0][0]
-        if last_loaded_ts is None:
-            last_loaded_ts = datetime(1970, 1, 1)
+        last_loaded_ts = last_loaded_ts or datetime(1970, 1, 1)
 
     print(f"Last loaded timestamp: {last_loaded_ts}")
 
-    # Read trips incrementally
+    # Read incremental trips (watermark = requested_at)
     trips_df = (
         spark.read
         .format("jdbc")
@@ -104,41 +109,40 @@ def main():
         print("No new trips to load")
         spark.stop()
         return
-    
-    # Generate batch id
+
+    # RAW metadata
     batch_id = str(uuid.uuid4())
 
-    # Add RAW metadata
     trips_df = (
         trips_df
-        .withColumn("source_system", lit("mobiity_oltp"))
-        .withColumn("raw_loaded_at",current_timestamp())
+        .withColumn("source_system", lit("mobility_oltp"))
+        .withColumn("raw_loaded_at", current_timestamp())
         .withColumn("batch_id", lit(batch_id))
+        .withColumn("load_date", to_date(col("raw_loaded_at")))
     )
 
-    # Write to RAW (partitioned by load_date)
-    load_date = datetime.now().strftime("%Y-%m-%d")
-    output_path = f"{RAW_BASE_PATH}/load_date={load_date}"
-
+    # Write Bronze (Delta Lake)
     (
         trips_df
         .write
+        .format("delta")
         .mode("append")
-        .parquet(output_path)
+        .partitionBy("load_date")
+        .save(BRONZE_BASE_PATH)
     )
 
     row_count = trips_df.count()
     max_ts = trips_df.select(spark_max("requested_at")).collect()[0][0]
 
-    print(f"Wrote {row_count} trips to Bronze")
+    print(f"Wrote {row_count} trips to Bronze (Delta)")
 
     spark.stop()
 
     upsert_etl_control(
-    job_name=JOB_NAME,
-    last_loaded_ts=max_ts,
-    status="SUCCESS"
-)
+        job_name=JOB_NAME,
+        last_loaded_ts=max_ts,
+        status="SUCCESS"
+    )
 
 
 if __name__ == "__main__":
