@@ -189,17 +189,6 @@ CREATE TABLE IF NOT EXISTS ratings (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ------------------------------------------------------------
--- 4) Metadata / Control tables for incrementals (ETL)
--- ------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS etl_control (
-  job_name            TEXT PRIMARY KEY,
-  last_loaded_ts      TIMESTAMPTZ,
-  last_success_ts     TIMESTAMPTZ,
-  last_status         TEXT NOT NULL DEFAULT 'never_run', -- success/fail/never_run
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- GDPR request log (optional but great for portfolio)
 DO $$ BEGIN
   CREATE TYPE gdpr_request_type AS ENUM ('erasure','access','rectification');
