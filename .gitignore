@@ -1,2 +1,4 @@
 /venv
 /data
+/metastore_db
+/derby.log
