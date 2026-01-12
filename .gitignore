@@ -2,3 +2,5 @@
 /data
 /metastore_db
 /derby.log
+src/bronze/test_bronze.py
+src/silver/test_silver.py
