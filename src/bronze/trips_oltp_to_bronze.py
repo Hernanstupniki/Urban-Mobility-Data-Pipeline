@@ -9,9 +9,7 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
-# ============================================================
 # Config
-# ============================================================
 JOB_NAME = "trips_oltp_to_bronze"
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -63,8 +61,8 @@ def read_last_loaded_ts(spark: SparkSession) -> datetime:
 
 def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, status: str):
     """
-    Upsert en Delta:
-    - si last_loaded_ts es None (FAIL), no pisa el watermark anterior
+    Upsert in Delta:
+    - If last_loaded_ts is None(FAIL), DO NOT step on the previous watermark.
     """
     ensure_etl_control_table(spark)
 
