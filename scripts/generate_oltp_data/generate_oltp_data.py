@@ -19,11 +19,7 @@ from datetime import datetime, timedelta
 import psycopg2
 from faker import Faker
 
-
-# ============================================================
 # Configuration (env-driven)
-# ============================================================
-
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
     "dbname": os.getenv("DB_NAME", "mobility_oltp"),
@@ -38,9 +34,27 @@ N_TRIPS = int(os.getenv("N_TRIPS", 10_000))
 N_PASSENGERS = int(os.getenv("N_PASSENGERS", 2_000))
 N_DRIVERS = int(os.getenv("N_DRIVERS", 500))
 
-BROKEN_RATE = 0.20
-LOG_EVERY = 5_000
+# Generic "broken data" rate for nullable fields (email/phone/fare/ended_at, etc.)
+BROKEN_RATE = float(os.getenv("BROKEN_RATE", "0.20"))
+LOG_EVERY = int(os.getenv("LOG_EVERY", "5000"))
 
+# --- Rates to control your Silver flag has_distance_in_invalid_status ---
+# Your flag is True when:
+# A) actual_distance_km NOT NULL and > 0 AND status NOT IN ('completed','started')
+# B) actual_distance_km IS NULL AND status == 'completed'
+#
+# So we control BOTH types of anomalies:
+INVALID_DISTANCE_IN_WRONG_STATUS_RATE = float(
+    os.getenv("INVALID_DISTANCE_IN_WRONG_STATUS_RATE", "0.01")
+)  # A: e.g., accepted/canceled with distance
+MISSING_DISTANCE_ON_COMPLETED_RATE = float(
+    os.getenv("MISSING_DISTANCE_ON_COMPLETED_RATE", "0.02")
+)  # B: completed but distance is NULL
+
+# Optional: even for started, sometimes you may want null (partial telemetry loss)
+MISSING_DISTANCE_ON_STARTED_RATE = float(
+    os.getenv("MISSING_DISTANCE_ON_STARTED_RATE", "0.01")
+)
 
 # ============================================================
 # Setup
@@ -61,19 +75,54 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-# ============================================================
 # Helpers
-# ============================================================
-
 def fetch_ids(cur, table, id_col):
     cur.execute(f"SELECT {id_col} FROM mobility.{table}")
     return [r[0] for r in cur.fetchall()]
 
 
-# ============================================================
-# Seed functions (run once)
-# ============================================================
+def compute_distances_for_status(status: str):
+    """
+    Returns (estimated_distance, actual_distance)
+    with controlled anomalies according to your has_distance_in_invalid_status logic.
+    """
+    estimated_distance = round(random.uniform(1, 30), 2)
 
+    # Base raw actual: estimated plus noise; clamp negatives to None
+    raw_actual = round(estimated_distance + random.uniform(-2, 5), 2)
+    raw_actual = None if raw_actual < 0 else raw_actual
+
+    # Default: no actual distance
+    actual_distance = None
+
+    if status == "completed":
+        # Normally completed SHOULD have distance.
+        # But create a small % of "completed with NULL distance" (anomaly B).
+        if raw_actual is None or random.random() < MISSING_DISTANCE_ON_COMPLETED_RATE:
+            actual_distance = None
+        else:
+            actual_distance = raw_actual
+
+    elif status == "started":
+        # Usually started has a distance (partial or current), but allow a tiny % NULL if desired.
+        if raw_actual is None or random.random() < MISSING_DISTANCE_ON_STARTED_RATE:
+            actual_distance = None
+        else:
+            actual_distance = raw_actual
+
+    else:
+        # requested / accepted / canceled:
+        # Normally should NOT have distance.
+        # But create a small % where distance appears anyway (anomaly A).
+        if raw_actual is not None and random.random() < INVALID_DISTANCE_IN_WRONG_STATUS_RATE:
+            actual_distance = raw_actual
+        else:
+            actual_distance = None
+
+    return estimated_distance, actual_distance
+
+
+# Seed functions (run once)
 def seed_passengers(cur):
     logging.info("Seeding passengers...")
     ids = []
@@ -96,7 +145,7 @@ def seed_passengers(cur):
                 maybe_null(fake.email()),
                 maybe_null(fake.phone_number()),
                 fake.city(),
-            )
+            ),
         )
 
         row = cur.fetchone()
@@ -143,10 +192,7 @@ def seed_drivers_and_vehicles(cur):
     return driver_ids, vehicle_ids
 
 
-# ============================================================
 # Incremental inserts
-# ============================================================
-
 def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
     logging.info(f"Inserting {N_TRIPS} trips...")
     trip_ids = []
@@ -157,9 +203,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
         started_at = accepted_at + timedelta(minutes=random.randint(1, 5))
         ended_at = started_at + timedelta(minutes=random.randint(5, 40))
 
-        status = random.choice(
-            ["requested", "accepted", "started", "completed", "canceled"]
-        )
+        status = random.choice(["requested", "accepted", "started", "completed", "canceled"])
 
         if status == "requested":
             accepted_at = started_at = ended_at = None
@@ -173,12 +217,10 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
         pickup_zone_id = random.choice(zone_ids)
         dropoff_zone_id = random.choice(zone_ids)
 
-        estimated_distance = round(random.uniform(1, 30), 2)
-        raw_actual_distance = round(estimated_distance + random.uniform(-2, 5),2)
-        actual_distance = (
-            None if raw_actual_distance < 0
-            else maybe_null(raw_actual_distance)
-        )
+        # Distances: now controlled to reduce has_distance_in_invalid_status but keep some
+        estimated_distance, actual_distance = compute_distances_for_status(status)
+
+        # Other nullable fields keep using BROKEN_RATE as before
         fare_amount = maybe_null(round(random.uniform(5, 80), 2))
 
         cur.execute(
@@ -211,7 +253,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
                 requested_at,
                 accepted_at,
                 started_at,
-                maybe_null(ended_at),
+                maybe_null(ended_at),  # keep your original "broken ended_at" behavior
                 estimated_distance,
                 actual_distance,
                 fare_amount,
@@ -259,16 +301,20 @@ def insert_ratings(cur, trip_ids):
             (random.randint(1, 5), trip_id),
         )
 
+
 def update_trip_statuses(cur, max_updates=3000):
     logging.info("Updating existing trips statuses...")
 
-    cur.execute("""
+    cur.execute(
+        """
         SELECT trip_id, started_at, estimated_distance_km
         FROM mobility.trips
         WHERE status IN ('requested','accepted','started')
         ORDER BY random()
         LIMIT %s
-    """, (max_updates,))
+        """,
+        (max_updates,),
+    )
 
     trips = cur.fetchall()
 
@@ -277,43 +323,61 @@ def update_trip_statuses(cur, max_updates=3000):
 
         if new_status == "completed":
             ended_at = started_at + timedelta(minutes=random.randint(5, 40)) if started_at else datetime.now()
-            raw_actual = float(estimated_distance) + random.uniform(-2, 5) if estimated_distance else None
-            actual_distance = None if raw_actual and raw_actual < 0 else raw_actual
 
-            cur.execute("""
+            # Compute a plausible actual distance from estimated, with noise.
+            raw_actual = float(estimated_distance) + random.uniform(-2, 5) if estimated_distance else None
+            raw_actual = None if (raw_actual is not None and raw_actual < 0) else raw_actual
+
+            # Apply missing-distance anomaly for completed (B)
+            if raw_actual is None or random.random() < MISSING_DISTANCE_ON_COMPLETED_RATE:
+                actual_distance = None
+            else:
+                actual_distance = raw_actual
+
+            cur.execute(
+                """
                 UPDATE mobility.trips
                 SET status = %s,
                     ended_at = %s,
                     actual_distance_km = %s
                 WHERE trip_id = %s
-            """, (
-                new_status,
-                ended_at,
-                actual_distance,
-                trip_id
-            ))
+                """,
+                (new_status, ended_at, actual_distance, trip_id),
+            )
 
         else:  # canceled
-            cur.execute("""
+            # Normally canceled should NOT have actual distance.
+            # But allow a small anomaly (A) where it keeps/gets a distance.
+            # We'll compute a candidate and apply the rate.
+            raw_candidate = float(estimated_distance) + random.uniform(-2, 5) if estimated_distance else None
+            raw_candidate = None if (raw_candidate is not None and raw_candidate < 0) else raw_candidate
+
+            if raw_candidate is not None and random.random() < INVALID_DISTANCE_IN_WRONG_STATUS_RATE:
+                actual_distance = raw_candidate
+            else:
+                actual_distance = None
+
+            cur.execute(
+                """
                 UPDATE mobility.trips
                 SET status = %s,
                     canceled_at = now(),
-                    cancel_reason = %s
+                    cancel_reason = %s,
+                    actual_distance_km = %s
                 WHERE trip_id = %s
-            """, (
-                new_status,
-                random.choice(["passenger","driver","system"]),
-                trip_id
-            ))
+                """,
+                (
+                    new_status,
+                    random.choice(["passenger", "driver", "system"]),
+                    actual_distance,
+                    trip_id,
+                ),
+            )
 
     logging.info(f"Updated {len(trips)} trips")
 
 
-
-# ============================================================
 # Main
-# ============================================================
-
 def main():
     logging.info("Starting OLTP data generation")
 
@@ -336,15 +400,11 @@ def main():
         if not driver_ids or not vehicle_ids:
             driver_ids, vehicle_ids = seed_drivers_and_vehicles(cur)
 
-        trip_ids = insert_trips(
-            cur,
-            passenger_ids,
-            driver_ids,
-            vehicle_ids,
-            zone_ids,
-        )
+        trip_ids = insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids)
+
         insert_payments(cur, trip_ids)
         logging.info("Payments inserted")
+
         insert_ratings(cur, trip_ids)
         logging.info("Ratings inserted")
 
