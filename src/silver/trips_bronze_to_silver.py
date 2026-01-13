@@ -9,9 +9,7 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
 
-# ============================================================
 # Config
-# ============================================================
 JOB_NAME = "trips_bronze_to_silver"
 
 ENV = os.getenv("ENV", "dev")
@@ -23,12 +21,10 @@ CONTROL_BASE_PATH = f"data/{ENV}/_control"
 ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
 
-# ============================================================
 # Delta control helpers
-# ============================================================
 def ensure_etl_control_table(spark):
     """
-    Crea la control table en Delta si no existe.
+    Create the table control in delta if not exits
     """
     if DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return
@@ -46,7 +42,7 @@ def ensure_etl_control_table(spark):
 
 def read_last_loaded_ts(spark) -> datetime:
     """
-    Lee watermark (last_loaded_ts) desde Delta control table.
+    Read watermark(last_loaded_ts) from Delta control table
     """
     if not DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return datetime(1970, 1, 1)
@@ -65,8 +61,8 @@ def read_last_loaded_ts(spark) -> datetime:
 
 def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
     """
-    Upsert del watermark en Delta.
-    - Si last_loaded_ts es None (FAIL), NO pisa el watermark anterior.
+    Upsert watermark in Delta.
+    - If last_loaded_ts is none(FAIL), DO NOT step the previous watermark.
     """
     ensure_etl_control_table(spark)
 
@@ -98,9 +94,7 @@ def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
     )
 
 
-# ============================================================
 # Main
-# ============================================================
 def main():
     global spark
     spark = (
@@ -118,7 +112,7 @@ def main():
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
     try:
-        # 1) Watermark (raw_loaded_at) desde Delta control table
+        # 1) Watermark (raw_loaded_at) from Delta control table
         last_ts = read_last_loaded_ts(spark)
         print(f"[{JOB_NAME}] last_loaded_ts(raw_loaded_at): {last_ts}")
 
@@ -151,7 +145,7 @@ def main():
             spark.stop()
             return
 
-        # 3) Latest record per trip_id (solo dentro de lo nuevo)
+        # 3) Latest record per trip_id (only inside the new data)
         window_spec = (
             Window.partitionBy("trip_id")
             .orderBy(col("raw_loaded_at").desc())
@@ -174,7 +168,12 @@ def main():
                     (col("actual_distance_km") > 0) &
                     (~col("status").isin("completed", "started")),
                     lit(True)
-                ).otherwise(lit(False))
+                )
+                .when(
+                    (col("actual_distance_km").isNull()) & 
+                    (col("status") == ("completed")), 
+                    lit(True))
+                .otherwise(lit(False))
             )
         )
 
@@ -244,7 +243,6 @@ def main():
             pass
         spark.stop()
         raise
-
 
 if __name__ == "__main__":
     main()
