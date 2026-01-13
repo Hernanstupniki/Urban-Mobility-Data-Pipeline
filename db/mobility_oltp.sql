@@ -1,13 +1,7 @@
 -- ============================================================
 -- Urban Mobility OLTP (PostgreSQL) - Schema
 -- ============================================================
--- Run in psql or pgAdmin. You can change the DB name if you want.
 
--- 1) Create DB (optional if you already have one)
--- CREATE DATABASE mobility_oltp;
--- \c mobility_oltp;
-
--- Optional: keep everything under one schema
 CREATE SCHEMA IF NOT EXISTS mobility;
 SET search_path TO mobility;
 
