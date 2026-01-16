@@ -4,7 +4,7 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit,min as spark_min,
-    max as spark_max, to_date, current_timestamp, coalesce
+    max as spark_max, to_date, current_timestamp, coalesce, abs as spark_abs
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
@@ -171,10 +171,17 @@ def main():
                 )
                 .when(
                     (col("actual_distance_km").isNull()) & 
-                    (col("status") == ("completed")), 
+                    (col("status").isin("completed")), 
                     lit(True))
                 .otherwise(lit(False))
             )
+            .withColumn(
+                "is_distance_outlier",
+                    when(
+                        col("actual_distance_km").isNotNull() & col("estimated_distance_km").isNotNull() &
+                        (spark_abs(col("actual_distance_km") - col("estimated_distance_km")) > 10),
+                        lit(True)).otherwise(lit(False))
+                        )
         )
 
         # 5) First run: create Silver with rich schema
@@ -191,6 +198,13 @@ def main():
             return
 
         # 6) Merge incremental
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        if AUTO_MERGE:
+            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
+            print("[CONFIG] Delta schema auto-merge: ENABLED")
+        else:
+            print("[CONFIG] Delta schema auto-merge: DISABLED")
+
         silver_table = DeltaTable.forPath(spark, SILVER_BASE_PATH)
 
         (
@@ -206,9 +220,12 @@ def main():
                     "status": "s.status",
                     "requested_at": "s.requested_at",
                     "raw_loaded_at": "s.raw_loaded_at",
+                    "estimated_distance_km": "s.estimated_distance_km",
+                    "actual_distance_km": "s.actual_distance_km",
                     "batch_id": "s.batch_id",
                     "source_system": "s.source_system",
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
+                    "is_distance_outlier": "s.is_distance_outlier",
                 }
             )
             .whenNotMatchedInsert(
@@ -220,9 +237,12 @@ def main():
                     "status": "s.status",
                     "requested_at": "s.requested_at",
                     "raw_loaded_at": "s.raw_loaded_at",
+                    "estimated_distance_km": "s.estimated_distance_km",
+                    "actual_distance_km": "s.actual_distance_km",
                     "batch_id": "s.batch_id",
                     "source_system": "s.source_system",
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
+                    "is_distance_outlier": "s.is_distance_outlier",
                 }
             )
             .execute()
