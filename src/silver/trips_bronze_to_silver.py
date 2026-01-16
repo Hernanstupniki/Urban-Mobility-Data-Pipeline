@@ -131,18 +131,25 @@ def main():
         NULL_LIKES = ["null", "n/a", "none", "-", ""]
         bronze_df = (
             bronze_reader
+            # Ids
             .withColumn("trip_id", col("trip_id").cast("long"))
             .withColumn("passenger_id", col("passenger_id").cast("long"))
             .withColumn("driver_id", col("driver_id").cast("long"))
             .withColumn("vehicle_id", col("vehicle_id").cast("long"))
             .withColumn("pickup_zone_id", col("pickup_zone_id").cast("long"))
             .withColumn("dropoff_zone_id", col("dropoff_zone_id").cast("long"))
+            # Coordinates
             .withColumn("start_lat", col("start_lat").cast("double"))
             .withColumn("start_lng", col("start_lng").cast("double"))
             .withColumn("end_lat", col("end_lat").cast("double"))
             .withColumn("end_lng", col("end_lng").cast("double"))
+            # Distances
+            .withColumn("estimated_distance_km", col("estimated_distance_km").cast("double"))
+            .withColumn("actual_distance_km", col("actual_distance_km").cast("double"))
+            # Status and source_system
             .withColumn("status", lower(trim(col("status"))))
             .withColumn("source_system", trim(col("source_system")))
+            # Cancellation fields: cancel_reason, cancel_by, cancel_note
             .withColumn("cancel_reason", lower(trim(col("cancel_reason"))))
             .withColumn("cancel_by", lower(trim(col("cancel_note"))))
             # cancel_note: trim + null-likes -> NULL
@@ -155,9 +162,17 @@ def main():
                 .when(lower(col("cancel_note")).isin(NULL_LIKES),
                       lit(None)
                 ).otherwise(col("cancel_note")))
-            .withColumn("estimated_distance_km", col("estimated_distance_km").cast("double"))
-            .withColumn("actual_distance_km", col("actual_distance_km").cast("double"))
+            #Fare amount
             .withColumn("fare_amount", col("fare_amount").cast("double"))
+            # Timestamps
+            .withColumn("requested_at", col("requested_at").cast("timestamp"))
+            .withColumn("accepted_at", col("accepted_at").cast("timestamp"))
+            .withColumn("started_at", col("started_at").cast("timestamp"))
+            .withColumn("ended_at", col("ended_at").cast("timestamp"))
+            .withColumn("canceled_at", col("canceled_at").cast("timestamp"))
+            .withColumn("created_at", col("created_at").cast("timestamp"))
+            .withColumn("updated_at", col("updated_at").cast("timestamp"))
+            .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
         )
 
             # Debug / confirmation
