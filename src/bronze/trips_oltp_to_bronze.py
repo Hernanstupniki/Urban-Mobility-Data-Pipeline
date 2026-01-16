@@ -111,11 +111,11 @@ def main():
     spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
 
     try:
-        # 1) Watermark (requested_at) desde Delta control table
+        # 1) Watermark (updated_at) desde Delta control table
         last_loaded_ts = read_last_loaded_ts(spark)
-        print(f"[{JOB_NAME}] last_loaded_ts(requested_at): {last_loaded_ts}")
+        print(f"[{JOB_NAME}] last_loaded_ts(updated_at): {last_loaded_ts}")
 
-        # 2) Read incremental trips from OLTP (watermark = requested_at)
+        # 2) Read incremental trips from OLTP (watermark = updated_at)
         trips_df = (
             spark.read.format("jdbc")
             .option("url", JDBC_URL)
@@ -124,7 +124,7 @@ def main():
             .option("password", DB_PASSWORD)
             .option("driver", "org.postgresql.Driver")
             .load()
-            .filter(col("requested_at") > lit(last_loaded_ts))
+            .filter(col("updated_at") > lit(last_loaded_ts))
         )
 
         if trips_df.rdd.isEmpty():
@@ -153,10 +153,10 @@ def main():
         )
 
         row_count = trips_df.count()
-        max_ts = trips_df.select(spark_max("requested_at")).first()[0]
+        max_ts = trips_df.select(spark_max("updated_at")).first()[0]
 
         print(f"Wrote {row_count} trips to Bronze (Delta)")
-        print(f"[{JOB_NAME}] new watermark(requested_at): {max_ts}")
+        print(f"[{JOB_NAME}] new watermark(updated_at): {max_ts}")
 
         # 5) Update watermark en Delta control table
         upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
