@@ -144,8 +144,10 @@ def main():
             .withColumn("end_lat", col("end_lat").cast("double"))
             .withColumn("end_lng", col("end_lng").cast("double"))
             # Distances
-            .withColumn("estimated_distance_km", col("estimated_distance_km").cast("double"))
-            .withColumn("actual_distance_km", col("actual_distance_km").cast("double"))
+            .withColumn("estimated_distance_km", col("estimated_distance_km").cast("double")
+                        .when(col("estimated_distance_km") < 0, lit(None)))
+            .withColumn("actual_distance_km", col("actual_distance_km").cast("double")
+                        .when(col("actual_distance_km") < 0, lit(None)))
             # Status and source_system
             .withColumn("status", lower(trim(col("status"))))
             .withColumn("source_system", trim(col("source_system")))
@@ -163,7 +165,8 @@ def main():
                       lit(None)
                 ).otherwise(col("cancel_note")))
             #Fare amount
-            .withColumn("fare_amount", col("fare_amount").cast("double"))
+            .withColumn("fare_amount", col("fare_amount").cast("double")
+                        .when(col("fare_amount") < 0, lit(None)))
             # Timestamps
             .withColumn("requested_at", col("requested_at").cast("timestamp"))
             .withColumn("accepted_at", col("accepted_at").cast("timestamp"))
@@ -175,7 +178,8 @@ def main():
             .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
         )
 
-            # Debug / confirmation
+
+        # Debug / confirmation
         bronze_count = bronze_df.count()
         print(f"[{JOB_NAME}] bronze_df count: {bronze_count}")
 
@@ -237,6 +241,14 @@ def main():
                         lit(True)
                         ).otherwise(lit(False))
             )
+            .withColumn(
+                "completed_but_ended_at_null",
+                    when(
+                        (col("status") == "completed") & 
+                        (col("ended_at").isNull()),
+                        lit(True)
+                    ).otherwise(lit(False))
+            )
         )
 
         # 5) First run: create Silver with rich schema
@@ -281,6 +293,7 @@ def main():
                     "source_system": "s.source_system",
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
                     "is_distance_outlier": "s.is_distance_outlier",
+                    "completed_but_ended_at_null": "s.completed_but_ended_at_null",
                 }
             )
             .whenNotMatchedInsert(
@@ -298,6 +311,7 @@ def main():
                     "source_system": "s.source_system",
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
                     "is_distance_outlier": "s.is_distance_outlier",
+                    "completed_but_ended_at_null": "s.completed_but_ended_at_null",
                 }
             )
             .execute()
