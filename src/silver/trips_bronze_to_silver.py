@@ -144,16 +144,20 @@ def main():
             .withColumn("end_lat", col("end_lat").cast("double"))
             .withColumn("end_lng", col("end_lng").cast("double"))
             # Distances
-            .withColumn("estimated_distance_km", col("estimated_distance_km").cast("double")
-                        .when(col("estimated_distance_km") < 0, lit(None)))
-            .withColumn("actual_distance_km", col("actual_distance_km").cast("double")
-                        .when(col("actual_distance_km") < 0, lit(None)))
-            # Status and source_system
-            .withColumn("status", lower(trim(col("status"))))
+            .withColumn(
+                "estimated_distance_km",
+                when(col("estimated_distance_km").cast("double") < 0, lit(None))
+                .otherwise(col("estimated_distance_km").cast("double"))
+            )
+            .withColumn(
+                "actual_distance_km",
+                when(col("actual_distance_km").cast("double") < 0, lit(None))
+                .otherwise(col("actual_distance_km").cast("double"))
+            )
             .withColumn("source_system", trim(col("source_system")))
             # Cancellation fields: cancel_reason, cancel_by, cancel_note
             .withColumn("cancel_reason", lower(trim(col("cancel_reason"))))
-            .withColumn("cancel_by", lower(trim(col("cancel_note"))))
+            .withColumn("cancel_by", lower(trim(col("cancel_by"))))
             # cancel_note: trim + null-likes -> NULL
             .withColumn("cancel_note", trim(col("cancel_note")))
             .withColumn(
@@ -165,8 +169,12 @@ def main():
                       lit(None)
                 ).otherwise(col("cancel_note")))
             #Fare amount
-            .withColumn("fare_amount", col("fare_amount").cast("double")
-                        .when(col("fare_amount") < 0, lit(None)))
+            .withColumn(
+                "fare_amount",
+                when(col("fare_amount").cast("double") < 0, lit(None))
+                .otherwise(col("fare_amount").cast("double"))
+            )
+
             # Timestamps
             .withColumn("requested_at", col("requested_at").cast("timestamp"))
             .withColumn("accepted_at", col("accepted_at").cast("timestamp"))
