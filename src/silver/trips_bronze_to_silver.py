@@ -168,13 +168,14 @@ def main():
                 .when(lower(col("cancel_note")).isin(NULL_LIKES),
                       lit(None)
                 ).otherwise(col("cancel_note")))
+            # Status
+            .withColumn("status", lower(trim(col("status"))))
             #Fare amount
             .withColumn(
                 "fare_amount",
                 when(col("fare_amount").cast("double") < 0, lit(None))
                 .otherwise(col("fare_amount").cast("double"))
             )
-
             # Timestamps
             .withColumn("requested_at", col("requested_at").cast("timestamp"))
             .withColumn("accepted_at", col("accepted_at").cast("timestamp"))
