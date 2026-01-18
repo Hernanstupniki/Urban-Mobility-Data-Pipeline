@@ -258,6 +258,24 @@ def main():
                         lit(True)
                     ).otherwise(lit(False))
             )
+            .withColumn(
+                "accepted_before_requested",
+                col("accepted_at").isNotNull() &
+                col("requested_at").isNotNull() &
+                (col("accepted_at") < col("requested_at"))
+            )
+            .withColumn(
+                "started_before_accepted",
+                col("started_at").isNotNull() &
+                col("accepted_at").isNotNull() &
+                (col("started_at") < col("accepted_at"))
+            )
+            .withColumn(
+                "ended_before_started",
+                col("ended_at").isNotNull() &
+                col("started_at").isNotNull() &
+                (col("ended_at") < col("started_at"))
+            )
         )
 
         # 5) First run: create Silver with rich schema
@@ -303,6 +321,9 @@ def main():
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
                     "is_distance_outlier": "s.is_distance_outlier",
                     "completed_but_ended_at_null": "s.completed_but_ended_at_null",
+                    "accepted_before_requested": "s.accepted_before_requested",
+                    "started_before_accepted": "s.started_before_accepted",
+                    "ended_before_started": "s.ended_before_started"
                 }
             )
             .whenNotMatchedInsert(
@@ -321,6 +342,9 @@ def main():
                     "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
                     "is_distance_outlier": "s.is_distance_outlier",
                     "completed_but_ended_at_null": "s.completed_but_ended_at_null",
+                    "accepted_before_requested": "s.accepted_before_requested",
+                    "started_before_accepted": "s.started_before_accepted",
+                    "ended_before_started": "s.ended_before_started"
                 }
             )
             .execute()
