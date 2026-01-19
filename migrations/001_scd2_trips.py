@@ -15,7 +15,7 @@ spark.sparkContext.setLogLevel("WARN")
 
 # 1) If dont exist, done
 if not DeltaTable.isDeltaTable(spark, SILVER_PATH):
-    print(f"[bootstrap_trips_scd2] Silver trips no existe (no es Delta): {SILVER_PATH}")
+    print(f"[bootstrap_trips_scd2] Silver trips dont exist (not Delta): {SILVER_PATH}")
     spark.stop()
     raise SystemExit(0)
 
@@ -34,7 +34,6 @@ print("[bootstrap_trips_scd2] Missing columns:", missing)
 
 # 3) Add SCD2 columns + basic backfill
 out = df
-
 # scd_hash same as scd_ready_df (same columns)
 if "scd_hash" in missing:
     out = out.withColumn(
