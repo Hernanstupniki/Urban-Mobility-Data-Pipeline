@@ -4,7 +4,7 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit, min as spark_min,
-    max as spark_max, to_date, current_timestamp, coalesce, abs as spark_abs, trim, lower, cast
+    max as spark_max, to_date, current_timestamp, coalesce, abs as spark_abs, trim, lower, cast, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
@@ -278,14 +278,44 @@ def main():
             )
         )
 
+        scd_ready_df = (
+            enriched_df
+            .withColumn(
+                "scd_hash",
+                sha2(
+                    concat_ws(
+                        "||",
+                        coalesce(col("passenger_id").cast("string"), lit("")),
+                        coalesce(col("driver_id").cast("string"), lit("")),
+                        coalesce(col("vehicle_id").cast("string"), lit("")),
+                        coalesce(col("status").cast("string"), lit("")),
+                        coalesce(col("requested_at").cast("string"), lit("")),
+                        coalesce(col("accepted_at").cast("string"), lit("")),
+                        coalesce(col("started_at").cast("string"), lit("")),
+                        coalesce(col("ended_at").cast("string"), lit("")),
+                        coalesce(col("canceled_at").cast("string"), lit("")),
+                        coalesce(col("estimated_distance_km").cast("string"), lit("")),
+                        coalesce(col("actual_distance_km").cast("string"), lit("")),
+                        coalesce(col("batch_id").cast("string"), lit("")),
+                        coalesce(col("source_system").cast("string"), lit(""))
+                    ),
+                    256
+                )
+            )
+            .withColumn("valid_from", col("raw_loaded_at"))
+            .withColumn("valid_to", lit(None).cast("timestamp"))
+            .withColumn("is_current", lit(True))
+        )
+
         # 5) First run: create Silver with rich schema
         if not silver_exists:
             (
-                enriched_df.write.format("delta")
+                scd_ready_df.write.format("delta")
                 .mode("overwrite")
+                .option("overwriteSchema", "true")
                 .save(SILVER_BASE_PATH)
             )
-            max_ts = enriched_df.select(spark_max("raw_loaded_at")).first()[0]
+            max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
             upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
             print("Silver trips table created + etl_control (delta) updated")
             spark.stop()
@@ -300,58 +330,58 @@ def main():
             print("[CONFIG] Delta schema auto-merge: DISABLED")
 
         silver_table = DeltaTable.forPath(spark, SILVER_BASE_PATH)
-
         (
             silver_table.alias("t")
-            .merge(enriched_df.alias("s"), "t.trip_id = s.trip_id")
-            .whenMatchedUpdate(
-                condition="s.raw_loaded_at > t.raw_loaded_at",
-                set={
-                    "trip_id": "s.trip_id",
-                    "passenger_id": "s.passenger_id",
-                    "driver_id": "s.driver_id",
-                    "vehicle_id": "s.vehicle_id",
-                    "status": "s.status",
-                    "requested_at": "s.requested_at",
-                    "raw_loaded_at": "s.raw_loaded_at",
-                    "estimated_distance_km": "s.estimated_distance_km",
-                    "actual_distance_km": "s.actual_distance_km",
-                    "batch_id": "s.batch_id",
-                    "source_system": "s.source_system",
-                    "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
-                    "is_distance_outlier": "s.is_distance_outlier",
-                    "completed_but_ended_at_null": "s.completed_but_ended_at_null",
-                    "accepted_before_requested": "s.accepted_before_requested",
-                    "started_before_accepted": "s.started_before_accepted",
-                    "ended_before_started": "s.ended_before_started"
-                }
+            .merge(
+                scd_ready_df.alias("s"),
+                "t.trip_id = s.trip_id AND t.is_current = true"
             )
-            .whenNotMatchedInsert(
-                values={
-                    "trip_id": "s.trip_id",
-                    "passenger_id": "s.passenger_id",
-                    "driver_id": "s.driver_id",
-                    "vehicle_id": "s.vehicle_id",
-                    "status": "s.status",
-                    "requested_at": "s.requested_at",
-                    "raw_loaded_at": "s.raw_loaded_at",
-                    "estimated_distance_km": "s.estimated_distance_km",
-                    "actual_distance_km": "s.actual_distance_km",
-                    "batch_id": "s.batch_id",
-                    "source_system": "s.source_system",
-                    "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
-                    "is_distance_outlier": "s.is_distance_outlier",
-                    "completed_but_ended_at_null": "s.completed_but_ended_at_null",
-                    "accepted_before_requested": "s.accepted_before_requested",
-                    "started_before_accepted": "s.started_before_accepted",
-                    "ended_before_started": "s.ended_before_started"
+            .whenMatchedUpdate(
+                condition="s.raw_loaded_at > t.raw_loaded_at AND s.scd_hash <> t.scd_hash",
+                set={
+                    "valid_to": "s.raw_loaded_at",
+                    "is_current": "false"
                 }
             )
             .execute()
         )
 
+        # 2) Insert the new version (also fixes trip_id that were left without current)
+        (
+            silver_table.alias("t")
+            .merge(
+                scd_ready_df.alias("s"),
+                "t.trip_id = s.trip_id AND t.is_current = true"
+            )
+            .whenNotMatchedInsert(values={
+                "trip_id": "s.trip_id",
+                "passenger_id": "s.passenger_id",
+                "driver_id": "s.driver_id",
+                "vehicle_id": "s.vehicle_id",
+                "status": "s.status",
+                "requested_at": "s.requested_at",
+                "accepted_at": "s.accepted_at",
+                "started_at": "s.started_at",
+                "ended_at": "s.ended_at",
+                "canceled_at": "s.canceled_at",
+                "estimated_distance_km": "s.estimated_distance_km",
+                "actual_distance_km": "s.actual_distance_km",
+                "batch_id": "s.batch_id",
+                "source_system": "s.source_system",
+                "raw_loaded_at": "s.raw_loaded_at",
+
+                "scd_hash": "s.scd_hash",
+                "valid_from": "s.valid_from",
+                "valid_to": "CAST(NULL AS TIMESTAMP)",
+                "is_current": "true"
+            })
+            .execute()
+        )
+
+
+
         # 7) Update watermark at the end
-        max_ts = enriched_df.select(spark_max("raw_loaded_at")).first()[0]
+        max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
         upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
 
         print("Silver trips MERGE completed + etl_control (delta) updated")
