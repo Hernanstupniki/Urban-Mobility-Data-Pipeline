@@ -91,7 +91,7 @@ def main():
 
         dim_zone.write.format("delta").mode("overwrite").save(DIM_ZONE_PATH)
 
-        upsert_etl_control(spark, JOB_NAME, current_timestamp(), "SUCCESS")
+        upsert_etl_control(spark, JOB_NAME, datetime.now(), "SUCCESS")
         print("dim_zone written (overwrite)")
 
     except Exception as e:
