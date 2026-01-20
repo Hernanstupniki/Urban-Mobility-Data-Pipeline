@@ -152,8 +152,10 @@ def main():
             .save(BRONZE_BASE_PATH)
         )
 
+
         row_count = trips_df.count()
         max_ts = trips_df.select(spark_max("updated_at")).first()[0]
+
 
         print(f"Wrote {row_count} trips to Bronze (Delta)")
         print(f"[{JOB_NAME}] new watermark(updated_at): {max_ts}")
