@@ -93,7 +93,6 @@ def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
         .execute()
     )
 
-
 # Main
 def main():
     global spark
@@ -288,17 +287,31 @@ def main():
                         coalesce(col("passenger_id").cast("string"), lit("")),
                         coalesce(col("driver_id").cast("string"), lit("")),
                         coalesce(col("vehicle_id").cast("string"), lit("")),
+                        coalesce(col("pickup_zone_id").cast("string"), lit("")),
+                        coalesce(col("dropoff_zone_id").cast("string"), lit("")),
+
                         coalesce(col("status").cast("string"), lit("")),
                         coalesce(col("requested_at").cast("string"), lit("")),
                         coalesce(col("accepted_at").cast("string"), lit("")),
                         coalesce(col("started_at").cast("string"), lit("")),
                         coalesce(col("ended_at").cast("string"), lit("")),
                         coalesce(col("canceled_at").cast("string"), lit("")),
+
                         coalesce(col("estimated_distance_km").cast("string"), lit("")),
                         coalesce(col("actual_distance_km").cast("string"), lit("")),
-                        coalesce(col("batch_id").cast("string"), lit("")),
+
+                        coalesce(col("start_lat").cast("string"), lit("")),
+                        coalesce(col("start_lng").cast("string"), lit("")),
+                        coalesce(col("end_lat").cast("string"), lit("")),
+                        coalesce(col("end_lng").cast("string"), lit("")),
+
+                        coalesce(col("cancel_reason").cast("string"), lit("")),
+                        coalesce(col("cancel_by").cast("string"), lit("")),
+                        coalesce(col("cancel_note").cast("string"), lit("")),
+
+                        coalesce(col("fare_amount").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
-                    ),
+                        ),
                     256
                 )
             )
@@ -354,31 +367,67 @@ def main():
                 "t.trip_id = s.trip_id AND t.is_current = true"
             )
             .whenNotMatchedInsert(values={
+                # Keys / ids
                 "trip_id": "s.trip_id",
                 "passenger_id": "s.passenger_id",
                 "driver_id": "s.driver_id",
                 "vehicle_id": "s.vehicle_id",
+                "pickup_zone_id": "s.pickup_zone_id",
+                "dropoff_zone_id": "s.dropoff_zone_id",
+
+                # Coordinates
+                "start_lat": "s.start_lat",
+                "start_lng": "s.start_lng",
+                "end_lat": "s.end_lat",
+                "end_lng": "s.end_lng",
+
+                # Status + timestamps
                 "status": "s.status",
                 "requested_at": "s.requested_at",
                 "accepted_at": "s.accepted_at",
                 "started_at": "s.started_at",
                 "ended_at": "s.ended_at",
                 "canceled_at": "s.canceled_at",
+
+                # Cancellation fields
+                "cancel_reason": "s.cancel_reason",
+                "cancel_by": "s.cancel_by",
+                "cancel_note": "s.cancel_note",
+
+                # Distances + fare
                 "estimated_distance_km": "s.estimated_distance_km",
                 "actual_distance_km": "s.actual_distance_km",
+                "fare_amount": "s.fare_amount",
+
+                # Source metadata
                 "batch_id": "s.batch_id",
                 "source_system": "s.source_system",
+
+                # Optional audit fields (si existen en tu DF)
+                "created_at": "s.created_at",
+                "updated_at": "s.updated_at",
+
+                # Ingestion timestamp
                 "raw_loaded_at": "s.raw_loaded_at",
 
+                # Enrichment / data quality flags
+                "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
+                "distance_diff_km": "s.distance_diff_km",
+                "is_distance_outlier": "s.is_distance_outlier",
+                "completed_but_ended_at_null": "s.completed_but_ended_at_null",
+                "accepted_before_requested": "s.accepted_before_requested",
+                "started_before_accepted": "s.started_before_accepted",
+                "ended_before_started": "s.ended_before_started",
+
+                # SCD2 fields
                 "scd_hash": "s.scd_hash",
                 "valid_from": "s.valid_from",
                 "valid_to": "CAST(NULL AS TIMESTAMP)",
                 "is_current": "true"
             })
+
             .execute()
         )
-
-
 
         # 7) Update watermark at the end
         max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
