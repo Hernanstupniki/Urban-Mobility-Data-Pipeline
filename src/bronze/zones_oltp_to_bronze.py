@@ -9,9 +9,7 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
-# ============================================================
 # Config
-# ============================================================
 JOB_NAME = "zones_oltp_to_bronze"
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -32,9 +30,7 @@ CONTROL_BASE_PATH = f"data/{ENV}/_control"
 ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
 
-# ============================================================
 # Delta control helpers
-# ============================================================
 def ensure_etl_control_table(spark: SparkSession):
     if DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return
@@ -101,9 +97,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
     )
 
 
-# ============================================================
 # Main
-# ============================================================
 def main():
     spark = (
         SparkSession.builder
