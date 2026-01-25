@@ -4,7 +4,7 @@ from pyspark.sql.functions import col, lit, trim, current_timestamp, sha2, conca
 from delta.tables import DeltaTable
 from datetime import datetime
 
-JOB_NAME = "gold_trips_dim_zone"
+JOB_NAME = "trips_gold_dim_zone"
 
 # OLTP
 DB_HOST = os.getenv("DB_HOST", "localhost")
