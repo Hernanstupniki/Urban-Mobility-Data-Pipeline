@@ -67,6 +67,11 @@ HIGH_PRECISION_NUMERIC_RATE = float(os.getenv("HIGH_PRECISION_NUMERIC_RATE", "0.
 # If you want more "completed missing ended_at" noise (independent of BROKEN_RATE)
 MISSING_ENDED_AT_ON_COMPLETED_RATE = float(os.getenv("MISSING_ENDED_AT_ON_COMPLETED_RATE", "0.02"))
 
+# --- Driver growth / changes per run (NEW) ---
+N_NEW_DRIVERS_PER_RUN = int(os.getenv("N_NEW_DRIVERS_PER_RUN", "25"))         # nuevos por corrida
+N_DRIVER_UPDATES_PER_RUN = int(os.getenv("N_DRIVER_UPDATES_PER_RUN", "60"))   # updates por corrida
+DRIVER_STATUS_CHANGE_RATE = float(os.getenv("DRIVER_STATUS_CHANGE_RATE", "0.30"))
+
 # ============================================================
 # Setup
 # ============================================================
@@ -287,6 +292,23 @@ def compute_distances_for_status(status: str):
 
 
 # ============================================================
+# Schema introspection helpers (NEW)
+# ============================================================
+
+def get_table_columns(cur, table_name: str):
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'mobility'
+          AND table_name = %s
+        """,
+        (table_name,)
+    )
+    return {r[0] for r in cur.fetchall()}
+
+
+# ============================================================
 # Seed functions (run once)
 # ============================================================
 
@@ -355,6 +377,184 @@ def seed_drivers_and_vehicles(cur):
         vehicle_ids.append(cur.fetchone()[0])
 
     return driver_ids, vehicle_ids
+
+
+# ============================================================
+# Incremental drivers/vehicles per run (NEW)
+# ============================================================
+
+def insert_new_drivers_and_vehicles(cur, n_new: int):
+    """
+    Insert n_new drivers and 1 vehicle for each driver.
+    Uses only columns that exist in your schema.
+    Returns (new_driver_ids, new_vehicle_ids)
+    """
+    if n_new <= 0:
+        return [], []
+
+    drivers_cols = get_table_columns(cur, "drivers")
+    vehicles_cols = get_table_columns(cur, "vehicles")
+
+    new_driver_ids, new_vehicle_ids = [], []
+
+    # status enum typical values (if you have driver_status)
+    status_choices = ["active", "inactive", "suspended"]
+
+    for _ in range(n_new):
+        # --- build dynamic INSERT for drivers ---
+        d_cols = []
+        d_vals = []
+
+        if "full_name" in drivers_cols:
+            d_cols.append("full_name")
+            d_vals.append(fake.name())
+
+        if "license_number" in drivers_cols:
+            d_cols.append("license_number")
+            d_vals.append(fake.unique.bothify("LIC-#####"))
+
+        # optional columns
+        if "email" in drivers_cols:
+            d_cols.append("email")
+            d_vals.append(maybe_null(fake.email()))
+
+        if "phone" in drivers_cols:
+            d_cols.append("phone")
+            d_vals.append(maybe_null(fake.phone_number()))
+
+        if "city" in drivers_cols:
+            d_cols.append("city")
+            d_vals.append(maybe_null(fake.city()))
+
+        if "status" in drivers_cols:
+            d_cols.append("status")
+            d_vals.append(random.choice(status_choices))
+
+        # timestamps (if your schema allows explicit values)
+        if "created_at" in drivers_cols:
+            d_cols.append("created_at")
+            d_vals.append(datetime.now())
+
+        if "updated_at" in drivers_cols:
+            d_cols.append("updated_at")
+            d_vals.append(datetime.now())
+
+        if not d_cols:
+            raise RuntimeError("drivers table has no usable columns (unexpected schema).")
+
+        placeholders = ",".join(["%s"] * len(d_cols))
+        sql = f"""
+            INSERT INTO mobility.drivers ({",".join(d_cols)})
+            VALUES ({placeholders})
+            RETURNING driver_id
+        """
+        cur.execute(sql, tuple(d_vals))
+        driver_id = cur.fetchone()[0]
+        new_driver_ids.append(driver_id)
+
+        # --- build dynamic INSERT for vehicles ---
+        v_cols = []
+        v_vals = []
+
+        if "driver_id" in vehicles_cols:
+            v_cols.append("driver_id")
+            v_vals.append(driver_id)
+
+        if "plate_number" in vehicles_cols:
+            v_cols.append("plate_number")
+            v_vals.append(fake.unique.license_plate())
+
+        if "vehicle_type" in vehicles_cols:
+            v_cols.append("vehicle_type")
+            v_vals.append(random.choice(["sedan", "hatchback", "motorbike"]))
+
+        if "status" in vehicles_cols:
+            v_cols.append("status")
+            v_vals.append(random.choice(["active", "inactive"]))
+
+        if "created_at" in vehicles_cols:
+            v_cols.append("created_at")
+            v_vals.append(datetime.now())
+
+        if "updated_at" in vehicles_cols:
+            v_cols.append("updated_at")
+            v_vals.append(datetime.now())
+
+        if v_cols:
+            placeholders = ",".join(["%s"] * len(v_cols))
+            sql = f"""
+                INSERT INTO mobility.vehicles ({",".join(v_cols)})
+                VALUES ({placeholders})
+                RETURNING vehicle_id
+            """
+            cur.execute(sql, tuple(v_vals))
+            vehicle_id = cur.fetchone()[0]
+            new_vehicle_ids.append(vehicle_id)
+
+    return new_driver_ids, new_vehicle_ids
+
+
+def update_existing_drivers(cur, max_updates: int):
+    """
+    Updates random existing drivers so updated_at moves and Silver SCD2 actually creates versions.
+    Tries to update columns that exist: status, full_name, phone, city, etc.
+    """
+    if max_updates <= 0:
+        return 0
+
+    drivers_cols = get_table_columns(cur, "drivers")
+
+    # pick random drivers
+    cur.execute(
+        "SELECT driver_id FROM mobility.drivers ORDER BY random() LIMIT %s",
+        (max_updates,)
+    )
+    driver_ids = [r[0] for r in cur.fetchall()]
+    if not driver_ids:
+        return 0
+
+    status_choices = ["active", "inactive", "suspended"]
+
+    updated = 0
+    for driver_id in driver_ids:
+        sets = []
+        vals = []
+
+        # Change status sometimes (if exists)
+        if "status" in drivers_cols and random.random() < DRIVER_STATUS_CHANGE_RATE:
+            sets.append("status = %s")
+            vals.append(random.choice(status_choices))
+
+        # Change some descriptive fields sometimes
+        if "full_name" in drivers_cols and random.random() < 0.05:
+            sets.append("full_name = %s")
+            vals.append(fake.name())
+
+        if "phone" in drivers_cols and random.random() < 0.10:
+            sets.append("phone = %s")
+            vals.append(maybe_null(fake.phone_number(), rate=0.15))
+
+        if "city" in drivers_cols and random.random() < 0.10:
+            sets.append("city = %s")
+            vals.append(maybe_null(fake.city(), rate=0.15))
+
+        if "email" in drivers_cols and random.random() < 0.02:
+            sets.append("email = %s")
+            vals.append(maybe_null(fake.email(), rate=0.20))
+
+        # Always touch updated_at if exists (this is what Bronze watermark usually tracks)
+        if "updated_at" in drivers_cols:
+            sets.append("updated_at = now()")
+
+        if not sets:
+            continue
+
+        sql = f"UPDATE mobility.drivers SET {', '.join(sets)} WHERE driver_id = %s"
+        vals.append(driver_id)
+        cur.execute(sql, tuple(vals))
+        updated += 1
+
+    return updated
 
 
 # ============================================================
@@ -666,6 +866,19 @@ def main():
         vehicle_ids = fetch_ids(cur, "vehicles", "vehicle_id")
         if not driver_ids or not vehicle_ids:
             driver_ids, vehicle_ids = seed_drivers_and_vehicles(cur)
+
+        # --- NEW: grow drivers/vehicles every run ---
+        new_driver_ids, new_vehicle_ids = insert_new_drivers_and_vehicles(cur, N_NEW_DRIVERS_PER_RUN)
+        if new_driver_ids:
+            logging.info(f"New drivers inserted this run: {len(new_driver_ids)}")
+            driver_ids.extend(new_driver_ids)
+        if new_vehicle_ids:
+            logging.info(f"New vehicles inserted this run: {len(new_vehicle_ids)}")
+            vehicle_ids.extend(new_vehicle_ids)
+
+        # --- NEW: update some existing drivers (triggers watermark + SCD2) ---
+        n_updated = update_existing_drivers(cur, N_DRIVER_UPDATES_PER_RUN)
+        logging.info(f"Drivers updated this run: {n_updated}")
 
         trip_ids = insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids)
 
