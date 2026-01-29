@@ -72,6 +72,10 @@ N_NEW_DRIVERS_PER_RUN = int(os.getenv("N_NEW_DRIVERS_PER_RUN", "25"))         # 
 N_DRIVER_UPDATES_PER_RUN = int(os.getenv("N_DRIVER_UPDATES_PER_RUN", "60"))   # updates por corrida
 DRIVER_STATUS_CHANGE_RATE = float(os.getenv("DRIVER_STATUS_CHANGE_RATE", "0.30"))
 
+# --- Passenger growth / changes per run (NEW) ---
+N_NEW_PASSENGERS_PER_RUN = int(os.getenv("N_NEW_PASSENGERS_PER_RUN", "80"))         # nuevos por corrida
+N_PASSENGER_UPDATES_PER_RUN = int(os.getenv("N_PASSENGER_UPDATES_PER_RUN", "200"))  # updates por corrida
+
 # ============================================================
 # Setup
 # ============================================================
@@ -303,7 +307,7 @@ def get_table_columns(cur, table_name: str):
         WHERE table_schema = 'mobility'
           AND table_name = %s
         """,
-        (table_name,)
+        (table_name,),
     )
     return {r[0] for r in cur.fetchall()}
 
@@ -507,7 +511,7 @@ def update_existing_drivers(cur, max_updates: int):
     # pick random drivers
     cur.execute(
         "SELECT driver_id FROM mobility.drivers ORDER BY random() LIMIT %s",
-        (max_updates,)
+        (max_updates,),
     )
     driver_ids = [r[0] for r in cur.fetchall()]
     if not driver_ids:
@@ -551,6 +555,157 @@ def update_existing_drivers(cur, max_updates: int):
 
         sql = f"UPDATE mobility.drivers SET {', '.join(sets)} WHERE driver_id = %s"
         vals.append(driver_id)
+        cur.execute(sql, tuple(vals))
+        updated += 1
+
+    return updated
+
+
+# ============================================================
+# Incremental passengers per run (NEW)
+# ============================================================
+
+def insert_new_passengers(cur, n_new: int):
+    """
+    Insert n_new passengers per run so passengers_oltp_to_bronze has new rows (updated_at advances).
+    Uses only columns that exist in your schema.
+    Returns list of new passenger_ids.
+
+    Important:
+    - passengers.email is UNIQUE in your schema
+    - faker.unique.email() is NOT unique vs DB
+    - we handle collisions with ON CONFLICT (email) DO NOTHING + retry loop
+    """
+    if n_new <= 0:
+        return []
+
+    passengers_cols = get_table_columns(cur, "passengers")
+    new_ids = []
+
+    # If table has no email column, we can't use ON CONFLICT(email)
+    # In that case, we do normal inserts.
+    has_email = "email" in passengers_cols
+
+    attempts = 0
+    max_attempts = max(n_new * 25, 200)  # safety guard
+
+    while len(new_ids) < n_new:
+        attempts += 1
+        if attempts > max_attempts:
+            logging.warning(
+                f"insert_new_passengers: reached max_attempts={max_attempts}. "
+                f"Inserted {len(new_ids)}/{n_new} passengers."
+            )
+            break
+
+        cols = []
+        vals = []
+
+        if "full_name" in passengers_cols:
+            cols.append("full_name")
+            vals.append(fake.name())
+
+        if has_email:
+            # allow NULL sometimes (if your schema allows it)
+            email_val = None if random.random() < BROKEN_RATE else fake.email()
+            cols.append("email")
+            vals.append(email_val)
+
+        if "phone" in passengers_cols:
+            cols.append("phone")
+            vals.append(maybe_null(fake.phone_number()))
+
+        if "city" in passengers_cols:
+            cols.append("city")
+            vals.append(fake.city())
+
+        # explicitly set timestamps if columns exist (guarantee watermark moves)
+        if "created_at" in passengers_cols:
+            cols.append("created_at")
+            vals.append(datetime.now())
+
+        if "updated_at" in passengers_cols:
+            cols.append("updated_at")
+            vals.append(datetime.now())
+
+        if not cols:
+            raise RuntimeError("passengers table has no usable columns (unexpected schema).")
+
+        placeholders = ",".join(["%s"] * len(cols))
+
+        if has_email:
+            sql = f"""
+                INSERT INTO mobility.passengers ({",".join(cols)})
+                VALUES ({placeholders})
+                ON CONFLICT (email) DO NOTHING
+                RETURNING passenger_id
+            """
+        else:
+            sql = f"""
+                INSERT INTO mobility.passengers ({",".join(cols)})
+                VALUES ({placeholders})
+                RETURNING passenger_id
+            """
+
+        cur.execute(sql, tuple(vals))
+        row = cur.fetchone()
+
+        # If conflict happened -> no row returned -> retry until we reach n_new
+        if row:
+            new_ids.append(row[0])
+
+    return new_ids
+
+
+def update_existing_passengers(cur, max_updates: int):
+    """
+    Updates random passengers so updated_at moves and incremental loads keep working.
+    Tries to update columns that exist.
+    """
+    if max_updates <= 0:
+        return 0
+
+    passengers_cols = get_table_columns(cur, "passengers")
+
+    cur.execute(
+        "SELECT passenger_id FROM mobility.passengers ORDER BY random() LIMIT %s",
+        (max_updates,),
+    )
+    passenger_ids = [r[0] for r in cur.fetchall()]
+    if not passenger_ids:
+        return 0
+
+    updated = 0
+    for pid in passenger_ids:
+        sets = []
+        vals = []
+
+        if "full_name" in passengers_cols and random.random() < 0.05:
+            sets.append("full_name = %s")
+            vals.append(fake.name())
+
+        if "phone" in passengers_cols and random.random() < 0.10:
+            sets.append("phone = %s")
+            vals.append(maybe_null(fake.phone_number(), rate=0.15))
+
+        if "city" in passengers_cols and random.random() < 0.10:
+            sets.append("city = %s")
+            vals.append(maybe_null(fake.city(), rate=0.15))
+
+        # do NOT touch email often because it might be UNIQUE
+        if "email" in passengers_cols and random.random() < 0.01:
+            sets.append("email = %s")
+            vals.append(maybe_null(fake.unique.email(), rate=0.25))
+
+        # Always bump updated_at if exists
+        if "updated_at" in passengers_cols:
+            sets.append("updated_at = now()")
+
+        if not sets:
+            continue
+
+        sql = f"UPDATE mobility.passengers SET {', '.join(sets)} WHERE passenger_id = %s"
+        vals.append(pid)
         cur.execute(sql, tuple(vals))
         updated += 1
 
@@ -729,7 +884,7 @@ def insert_ratings(cur, trip_ids):
           AND passenger_id IS NOT NULL
           AND status = 'completed'
         """,
-        (trip_ids,)
+        (trip_ids,),
     )
     eligible_trip_ids = [r[0] for r in cur.fetchall()]
 
@@ -861,6 +1016,16 @@ def main():
         passenger_ids = fetch_ids(cur, "passengers", "passenger_id")
         if not passenger_ids:
             passenger_ids = seed_passengers(cur)
+
+        # --- NEW: grow passengers every run ---
+        new_passenger_ids = insert_new_passengers(cur, N_NEW_PASSENGERS_PER_RUN)
+        if new_passenger_ids:
+            logging.info(f"New passengers inserted this run: {len(new_passenger_ids)}")
+            passenger_ids.extend(new_passenger_ids)
+
+        # --- NEW: update some existing passengers (moves watermark) ---
+        n_p_updated = update_existing_passengers(cur, N_PASSENGER_UPDATES_PER_RUN)
+        logging.info(f"Passengers updated this run: {n_p_updated}")
 
         driver_ids = fetch_ids(cur, "drivers", "driver_id")
         vehicle_ids = fetch_ids(cur, "vehicles", "vehicle_id")
