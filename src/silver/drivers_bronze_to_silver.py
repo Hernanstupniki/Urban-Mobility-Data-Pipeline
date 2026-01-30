@@ -23,10 +23,7 @@ ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
 
 # Delta control helpers
-def ensure_etl_control_table(spark):
-    """
-    Create the table control in delta if not exists
-    """
+def ensure_etl_control_table(spark: SparkSession):
     if DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return
 
@@ -41,10 +38,7 @@ def ensure_etl_control_table(spark):
     )
 
 
-def read_last_loaded_ts(spark) -> datetime:
-    """
-    Read watermark(last_loaded_ts) from Delta control table
-    """
+def read_last_loaded_ts(spark: SparkSession) -> datetime:
     if not DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return datetime(1970, 1, 1)
 
@@ -60,10 +54,10 @@ def read_last_loaded_ts(spark) -> datetime:
     return ts or datetime(1970, 1, 1)
 
 
-def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
+def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, status: str):
     """
-    Upsert watermark in Delta.
-    - If last_loaded_ts is none(FAIL), DO NOT step the previous watermark.
+    Upsert in Delta:
+    - If last_loaded_ts is None(FAIL), DO NOT step on the previous watermark.
     """
     ensure_etl_control_table(spark)
 
@@ -97,10 +91,11 @@ def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
 
 # Main
 def main():
-    global spark
     spark = (
         SparkSession.builder
         .appName(JOB_NAME)
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
@@ -233,7 +228,7 @@ def main():
                 .save(SILVER_BASE_PATH)
             )
             max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
-            upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
+            upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
             print("Silver drivers table created + etl_control (delta) updated")
             spark.stop()
             return
@@ -302,15 +297,15 @@ def main():
 
         # 8) Update watermark
         max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
-        upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
+        upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
 
         print("Silver drivers MERGE completed + etl_control (delta) updated")
         spark.stop()
 
     except Exception as e:
-        # marcar FAIL sin mover watermark
+        # FAIL
         try:
-            upsert_etl_control(JOB_NAME, None, f"FAIL: {type(e).__name__}")
+            upsert_etl_control(spark, JOB_NAME, None, f"FAIL: {type(e).__name__}")
         except Exception:
             pass
         spark.stop()
