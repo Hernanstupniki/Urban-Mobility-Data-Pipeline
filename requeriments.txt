@@ -1,4 +1,0 @@
-pyspark==3.5.0
-delta-spark==3.1.0
-psycopg2-binary==2.9.11
-faker==40.1.0
