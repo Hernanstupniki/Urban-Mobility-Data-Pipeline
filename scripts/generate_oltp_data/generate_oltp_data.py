@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timedelta
 
 import psycopg2
+from psycopg2 import errors
 from faker import Faker
 
 # ============================================================
@@ -67,14 +68,19 @@ HIGH_PRECISION_NUMERIC_RATE = float(os.getenv("HIGH_PRECISION_NUMERIC_RATE", "0.
 # If you want more "completed missing ended_at" noise (independent of BROKEN_RATE)
 MISSING_ENDED_AT_ON_COMPLETED_RATE = float(os.getenv("MISSING_ENDED_AT_ON_COMPLETED_RATE", "0.02"))
 
-# --- Driver growth / changes per run (NEW) ---
+# --- Driver growth / changes per run ---
 N_NEW_DRIVERS_PER_RUN = int(os.getenv("N_NEW_DRIVERS_PER_RUN", "25"))         # nuevos por corrida
 N_DRIVER_UPDATES_PER_RUN = int(os.getenv("N_DRIVER_UPDATES_PER_RUN", "60"))   # updates por corrida
 DRIVER_STATUS_CHANGE_RATE = float(os.getenv("DRIVER_STATUS_CHANGE_RATE", "0.30"))
 
-# --- Passenger growth / changes per run (NEW) ---
+# --- Passenger growth / changes per run ---
 N_NEW_PASSENGERS_PER_RUN = int(os.getenv("N_NEW_PASSENGERS_PER_RUN", "80"))         # nuevos por corrida
 N_PASSENGER_UPDATES_PER_RUN = int(os.getenv("N_PASSENGER_UPDATES_PER_RUN", "200"))  # updates por corrida
+
+# --- GDPR / RTBF simulation (OLTP-only) ---
+GDPR_ERASURE_RATE = float(os.getenv("GDPR_ERASURE_RATE", "0.10"))  # 10% de las corridas aplican GDPR
+N_GDPR_ERASURES_PER_RUN = int(os.getenv("N_GDPR_ERASURES_PER_RUN", "2"))
+
 
 # ============================================================
 # Setup
@@ -101,6 +107,15 @@ def fetch_ids(cur, table, id_col):
     return [r[0] for r in cur.fetchall()]
 
 
+def fetch_active_passenger_ids(cur):
+    cur.execute("""
+        SELECT passenger_id
+        FROM mobility.passengers
+        WHERE is_deleted = FALSE
+    """)
+    return [r[0] for r in cur.fetchall()]
+
+
 def fetch_driver_vehicle_pairs(cur):
     """
     Returns list of tuples: (driver_id, vehicle_id) for existing vehicles.
@@ -118,7 +133,6 @@ def maybe_high_precision(value, max_extra_decimals=6):
         return None
     if random.random() >= HIGH_PRECISION_NUMERIC_RATE:
         return value
-    # add extra fractional precision
     noise = random.random() / (10 ** max_extra_decimals)
     return float(value) + noise
 
@@ -134,11 +148,9 @@ def noisy_cancel_note():
     if random.random() > CANCEL_NOTE_GARBAGE_RATE:
         return None
 
-    # null-like
     if random.random() < CANCEL_NOTE_NULLLIKE_RATE:
         return random.choice(["NULL", "null", "N/A", "-", "None", "  NULL  "])
 
-    # empty string
     if random.random() < CANCEL_NOTE_EMPTY_STRING_RATE:
         return ""
 
@@ -151,7 +163,6 @@ def noisy_cancel_note():
         fake.sentence(nb_words=6),
     ])
 
-    # add whitespace and line breaks
     if random.random() < 0.5:
         base = " " * random.randint(1, 4) + base + " " * random.randint(1, 4)
     if random.random() < 0.2:
@@ -167,21 +178,17 @@ def generate_coords():
     Generates (start_lat, start_lng, end_lat, end_lng)
     with missing and out-of-range noise.
     """
-    # missing coords
     if random.random() < COORDS_MISSING_RATE:
         return (None, None, None, None)
 
-    # base: plausible coords using faker
-    # faker returns strings often -> cast to float
     start_lat = float(fake.latitude())
     start_lng = float(fake.longitude())
     end_lat = float(fake.latitude())
     end_lng = float(fake.longitude())
 
-    # out of range noise
     if random.random() < COORDS_OUT_OF_RANGE_RATE:
-        start_lat = random.choice([95.0, -95.0, 123.456])   # invalid lat
-        start_lng = random.choice([190.0, -190.0, 222.222]) # invalid lng
+        start_lat = random.choice([95.0, -95.0, 123.456])
+        start_lng = random.choice([190.0, -190.0, 222.222])
 
     if random.random() < COORDS_OUT_OF_RANGE_RATE:
         end_lat = random.choice([95.0, -95.0, 123.456])
@@ -197,13 +204,9 @@ def compute_times_for_status(status: str):
       accepted_at >= requested_at (if not null)
       started_at  >= requested_at (if not null)
       ended_at    >= requested_at (if not null)
-
-    Note: We intentionally allow weird ordering between accepted_at and started_at
-    because the constraint doesn't forbid it (real systems can be messy).
     """
     requested_at = datetime.now()
 
-    # base lags
     accept_lag = timedelta(minutes=random.randint(1, 10))
     start_lag = accept_lag + timedelta(minutes=random.randint(0, 10))
     end_lag = start_lag + timedelta(minutes=random.randint(5, 40))
@@ -213,19 +216,14 @@ def compute_times_for_status(status: str):
     ended_at = requested_at + end_lag
     canceled_at = None
 
-    # introduce weirdness but keep >= requested_at
     if random.random() < TIME_WEIRDNESS_RATE:
-        # huge delays
         if random.random() < 0.5:
             accepted_at = requested_at + timedelta(hours=random.randint(1, 72))
             started_at = requested_at + timedelta(hours=random.randint(1, 72))
             ended_at = requested_at + timedelta(hours=random.randint(1, 72))
         else:
-            # started_at earlier than accepted_at (still >= requested_at)
             started_at = requested_at + timedelta(minutes=random.randint(1, 5))
             accepted_at = requested_at + timedelta(minutes=random.randint(6, 15))
-
-            # ended_at may exist even if started is early
             ended_at = requested_at + timedelta(minutes=random.randint(10, 60))
 
     if status == "requested":
@@ -238,16 +236,12 @@ def compute_times_for_status(status: str):
         return requested_at, accepted_at, started_at, None, None
 
     if status == "completed":
-        # allow missing ended_at anomaly (plus maybe_null below)
         if random.random() < MISSING_ENDED_AT_ON_COMPLETED_RATE:
             ended_at = None
         return requested_at, accepted_at, started_at, ended_at, None
 
     if status == "canceled":
         canceled_at = requested_at + timedelta(minutes=random.randint(1, 20))
-        # In canceled, you can still have accepted_at/started_at sometimes (messy state machine)
-        # But keep >= requested_at always.
-        # We'll sometimes null them for realism.
         if random.random() < 0.5:
             accepted_at = None
         if random.random() < 0.8:
@@ -255,14 +249,12 @@ def compute_times_for_status(status: str):
         ended_at = None
         return requested_at, accepted_at, started_at, ended_at, canceled_at
 
-    # fallback
     return requested_at, accepted_at, started_at, ended_at, canceled_at
 
 
 def compute_distances_for_status(status: str):
     """
-    Returns (estimated_distance, actual_distance) with controlled anomalies
-    according to your has_distance_in_invalid_status logic.
+    Returns (estimated_distance, actual_distance) with controlled anomalies.
     """
     estimated_distance = round(random.uniform(1, 30), 2)
     raw_actual = round(estimated_distance + random.uniform(-2, 5), 2)
@@ -288,7 +280,6 @@ def compute_distances_for_status(status: str):
         else:
             actual_distance = None
 
-    # add numeric precision noise
     estimated_distance = maybe_high_precision(estimated_distance)
     actual_distance = maybe_high_precision(actual_distance)
 
@@ -296,7 +287,7 @@ def compute_distances_for_status(status: str):
 
 
 # ============================================================
-# Schema introspection helpers (NEW)
+# Schema introspection helpers
 # ============================================================
 
 def get_table_columns(cur, table_name: str):
@@ -351,40 +342,78 @@ def seed_passengers(cur):
 
 
 def seed_drivers_and_vehicles(cur):
+    """
+    Seed drivers and 1 vehicle each, only if empty.
+    Safe with UNIQUE constraints via ON CONFLICT + retries.
+    """
     logging.info("Seeding drivers and vehicles...")
     driver_ids, vehicle_ids = [], []
 
-    for _ in range(N_DRIVERS):
+    status_choices = ["active", "inactive", "suspended"]
+    vehicle_status_choices = ["active", "inactive"]
+    vehicle_type_choices = ["sedan", "hatchback", "motorbike"]
+
+    inserted = 0
+    attempts = 0
+    max_attempts = max(N_DRIVERS * 50, 2000)
+
+    while inserted < N_DRIVERS:
+        attempts += 1
+        if attempts > max_attempts:
+            raise RuntimeError(f"seed_drivers_and_vehicles: max_attempts reached. Inserted {inserted}/{N_DRIVERS}")
+
+        # insert driver
         cur.execute(
             """
-            INSERT INTO mobility.drivers (full_name, license_number)
-            VALUES (%s, %s)
+            INSERT INTO mobility.drivers (full_name, license_number, status)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (license_number) DO NOTHING
             RETURNING driver_id
             """,
-            (fake.name(), fake.unique.bothify("LIC-#####")),
+            (fake.name(), fake.bothify("LIC-#####"), random.choice(status_choices)),
         )
-        driver_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        if not row:
+            continue  # collision, retry
+
+        driver_id = row[0]
         driver_ids.append(driver_id)
 
-        cur.execute(
-            """
-            INSERT INTO mobility.vehicles (driver_id, plate_number, vehicle_type)
-            VALUES (%s, %s, %s)
-            RETURNING vehicle_id
-            """,
-            (
-                driver_id,
-                fake.unique.license_plate(),
-                random.choice(["sedan", "hatchback", "motorbike"]),
-            ),
-        )
-        vehicle_ids.append(cur.fetchone()[0])
+        # insert vehicle for that driver (retry on plate collision)
+        v_attempts = 0
+        while True:
+            v_attempts += 1
+            if v_attempts > 50:
+                raise RuntimeError("seed_drivers_and_vehicles: too many plate collisions")
+
+            cur.execute(
+                """
+                INSERT INTO mobility.vehicles (driver_id, plate_number, vehicle_type, status)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (plate_number) DO NOTHING
+                RETURNING vehicle_id
+                """,
+                (
+                    driver_id,
+                    fake.license_plate(),
+                    random.choice(vehicle_type_choices),
+                    random.choice(vehicle_status_choices),
+                ),
+            )
+            vrow = cur.fetchone()
+            if vrow:
+                vehicle_ids.append(vrow[0])
+                break  # vehicle inserted
+
+        inserted += 1
+        if inserted % 100 == 0:
+            logging.info(f"Drivers/Vehicles inserted: {inserted}/{N_DRIVERS}")
 
     return driver_ids, vehicle_ids
 
 
 # ============================================================
-# Incremental drivers/vehicles per run (NEW)
+# Incremental drivers/vehicles per run
 # ============================================================
 
 def insert_new_drivers_and_vehicles(cur, n_new: int):
@@ -401,10 +430,20 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
     new_driver_ids, new_vehicle_ids = [], []
 
-    # status enum typical values (if you have driver_status)
     status_choices = ["active", "inactive", "suspended"]
+    vehicle_status_choices = ["active", "inactive"]
+    vehicle_type_choices = ["sedan", "hatchback", "motorbike"]
 
-    for _ in range(n_new):
+    inserted = 0
+    attempts = 0
+    max_attempts = max(n_new * 80, 500)
+
+    while inserted < n_new:
+        attempts += 1
+        if attempts > max_attempts:
+            logging.warning(f"insert_new_drivers_and_vehicles: max_attempts reached. Inserted {inserted}/{n_new}")
+            break
+
         # --- build dynamic INSERT for drivers ---
         d_cols = []
         d_vals = []
@@ -415,26 +454,12 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
         if "license_number" in drivers_cols:
             d_cols.append("license_number")
-            d_vals.append(fake.unique.bothify("LIC-#####"))
-
-        # optional columns
-        if "email" in drivers_cols:
-            d_cols.append("email")
-            d_vals.append(maybe_null(fake.email()))
-
-        if "phone" in drivers_cols:
-            d_cols.append("phone")
-            d_vals.append(maybe_null(fake.phone_number()))
-
-        if "city" in drivers_cols:
-            d_cols.append("city")
-            d_vals.append(maybe_null(fake.city()))
+            d_vals.append(fake.bothify("LIC-#####"))
 
         if "status" in drivers_cols:
             d_cols.append("status")
             d_vals.append(random.choice(status_choices))
 
-        # timestamps (if your schema allows explicit values)
         if "created_at" in drivers_cols:
             d_cols.append("created_at")
             d_vals.append(datetime.now())
@@ -447,13 +472,22 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
             raise RuntimeError("drivers table has no usable columns (unexpected schema).")
 
         placeholders = ",".join(["%s"] * len(d_cols))
+        conflict_clause = ""
+        if "license_number" in d_cols:
+            conflict_clause = "ON CONFLICT (license_number) DO NOTHING"
+
         sql = f"""
             INSERT INTO mobility.drivers ({",".join(d_cols)})
             VALUES ({placeholders})
+            {conflict_clause}
             RETURNING driver_id
         """
         cur.execute(sql, tuple(d_vals))
-        driver_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        if not row:
+            continue  # collision, retry
+
+        driver_id = row[0]
         new_driver_ids.append(driver_id)
 
         # --- build dynamic INSERT for vehicles ---
@@ -466,15 +500,15 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
         if "plate_number" in vehicles_cols:
             v_cols.append("plate_number")
-            v_vals.append(fake.unique.license_plate())
+            v_vals.append(fake.license_plate())
 
         if "vehicle_type" in vehicles_cols:
             v_cols.append("vehicle_type")
-            v_vals.append(random.choice(["sedan", "hatchback", "motorbike"]))
+            v_vals.append(random.choice(vehicle_type_choices))
 
         if "status" in vehicles_cols:
             v_cols.append("status")
-            v_vals.append(random.choice(["active", "inactive"]))
+            v_vals.append(random.choice(vehicle_status_choices))
 
         if "created_at" in vehicles_cols:
             v_cols.append("created_at")
@@ -484,31 +518,51 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
             v_cols.append("updated_at")
             v_vals.append(datetime.now())
 
+        # plate unique -> retry on conflict
         if v_cols:
-            placeholders = ",".join(["%s"] * len(v_cols))
-            sql = f"""
-                INSERT INTO mobility.vehicles ({",".join(v_cols)})
-                VALUES ({placeholders})
-                RETURNING vehicle_id
-            """
-            cur.execute(sql, tuple(v_vals))
-            vehicle_id = cur.fetchone()[0]
-            new_vehicle_ids.append(vehicle_id)
+            v_inserted = False
+            for _ in range(50):
+                placeholders = ",".join(["%s"] * len(v_cols))
+                conflict_clause = ""
+                if "plate_number" in v_cols:
+                    conflict_clause = "ON CONFLICT (plate_number) DO NOTHING"
+
+                vsql = f"""
+                    INSERT INTO mobility.vehicles ({",".join(v_cols)})
+                    VALUES ({placeholders})
+                    {conflict_clause}
+                    RETURNING vehicle_id
+                """
+                cur.execute(vsql, tuple(v_vals))
+                vrow = cur.fetchone()
+                if vrow:
+                    new_vehicle_ids.append(vrow[0])
+                    v_inserted = True
+                    break
+
+                # collision -> generate a new plate
+                if "plate_number" in v_cols:
+                    idx = v_cols.index("plate_number")
+                    v_vals[idx] = fake.license_plate()
+
+            if not v_inserted:
+                raise RuntimeError("insert_new_drivers_and_vehicles: too many plate collisions")
+
+        inserted += 1
 
     return new_driver_ids, new_vehicle_ids
 
 
 def update_existing_drivers(cur, max_updates: int):
     """
-    Updates random existing drivers so updated_at moves and Silver SCD2 actually creates versions.
-    Tries to update columns that exist: status, full_name, phone, city, etc.
+    Updates random existing drivers so updated_at moves.
+    Tries to update columns that exist: status, full_name, etc.
     """
     if max_updates <= 0:
         return 0
 
     drivers_cols = get_table_columns(cur, "drivers")
 
-    # pick random drivers
     cur.execute(
         "SELECT driver_id FROM mobility.drivers ORDER BY random() LIMIT %s",
         (max_updates,),
@@ -524,29 +578,15 @@ def update_existing_drivers(cur, max_updates: int):
         sets = []
         vals = []
 
-        # Change status sometimes (if exists)
         if "status" in drivers_cols and random.random() < DRIVER_STATUS_CHANGE_RATE:
             sets.append("status = %s")
             vals.append(random.choice(status_choices))
 
-        # Change some descriptive fields sometimes
         if "full_name" in drivers_cols and random.random() < 0.05:
             sets.append("full_name = %s")
             vals.append(fake.name())
 
-        if "phone" in drivers_cols and random.random() < 0.10:
-            sets.append("phone = %s")
-            vals.append(maybe_null(fake.phone_number(), rate=0.15))
-
-        if "city" in drivers_cols and random.random() < 0.10:
-            sets.append("city = %s")
-            vals.append(maybe_null(fake.city(), rate=0.15))
-
-        if "email" in drivers_cols and random.random() < 0.02:
-            sets.append("email = %s")
-            vals.append(maybe_null(fake.email(), rate=0.20))
-
-        # Always touch updated_at if exists (this is what Bronze watermark usually tracks)
+        # Always bump updated_at if exists (trigger also does it; this is explicit)
         if "updated_at" in drivers_cols:
             sets.append("updated_at = now()")
 
@@ -562,19 +602,14 @@ def update_existing_drivers(cur, max_updates: int):
 
 
 # ============================================================
-# Incremental passengers per run (NEW)
+# Incremental passengers per run
 # ============================================================
 
 def insert_new_passengers(cur, n_new: int):
     """
-    Insert n_new passengers per run so passengers_oltp_to_bronze has new rows (updated_at advances).
+    Insert n_new passengers per run.
     Uses only columns that exist in your schema.
     Returns list of new passenger_ids.
-
-    Important:
-    - passengers.email is UNIQUE in your schema
-    - faker.unique.email() is NOT unique vs DB
-    - we handle collisions with ON CONFLICT (email) DO NOTHING + retry loop
     """
     if n_new <= 0:
         return []
@@ -582,12 +617,10 @@ def insert_new_passengers(cur, n_new: int):
     passengers_cols = get_table_columns(cur, "passengers")
     new_ids = []
 
-    # If table has no email column, we can't use ON CONFLICT(email)
-    # In that case, we do normal inserts.
     has_email = "email" in passengers_cols
 
     attempts = 0
-    max_attempts = max(n_new * 25, 200)  # safety guard
+    max_attempts = max(n_new * 25, 200)
 
     while len(new_ids) < n_new:
         attempts += 1
@@ -606,7 +639,6 @@ def insert_new_passengers(cur, n_new: int):
             vals.append(fake.name())
 
         if has_email:
-            # allow NULL sometimes (if your schema allows it)
             email_val = None if random.random() < BROKEN_RATE else fake.email()
             cols.append("email")
             vals.append(email_val)
@@ -619,7 +651,6 @@ def insert_new_passengers(cur, n_new: int):
             cols.append("city")
             vals.append(fake.city())
 
-        # explicitly set timestamps if columns exist (guarantee watermark moves)
         if "created_at" in passengers_cols:
             cols.append("created_at")
             vals.append(datetime.now())
@@ -627,9 +658,6 @@ def insert_new_passengers(cur, n_new: int):
         if "updated_at" in passengers_cols:
             cols.append("updated_at")
             vals.append(datetime.now())
-
-        if not cols:
-            raise RuntimeError("passengers table has no usable columns (unexpected schema).")
 
         placeholders = ",".join(["%s"] * len(cols))
 
@@ -649,8 +677,6 @@ def insert_new_passengers(cur, n_new: int):
 
         cur.execute(sql, tuple(vals))
         row = cur.fetchone()
-
-        # If conflict happened -> no row returned -> retry until we reach n_new
         if row:
             new_ids.append(row[0])
 
@@ -659,8 +685,8 @@ def insert_new_passengers(cur, n_new: int):
 
 def update_existing_passengers(cur, max_updates: int):
     """
-    Updates random passengers so updated_at moves and incremental loads keep working.
-    Tries to update columns that exist.
+    Updates random passengers so updated_at moves.
+    SAFE: does NOT update email (UNIQUE) to avoid collisions.
     """
     if max_updates <= 0:
         return 0
@@ -692,12 +718,6 @@ def update_existing_passengers(cur, max_updates: int):
             sets.append("city = %s")
             vals.append(maybe_null(fake.city(), rate=0.15))
 
-        # do NOT touch email often because it might be UNIQUE
-        if "email" in passengers_cols and random.random() < 0.01:
-            sets.append("email = %s")
-            vals.append(maybe_null(fake.unique.email(), rate=0.25))
-
-        # Always bump updated_at if exists
         if "updated_at" in passengers_cols:
             sets.append("updated_at = now()")
 
@@ -713,6 +733,31 @@ def update_existing_passengers(cur, max_updates: int):
 
 
 # ============================================================
+# GDPR (OLTP-only)
+# ============================================================
+
+def apply_gdpr_erasure_requests(cur, passenger_ids, n_requests: int):
+    """
+    Calls the OLTP function mobility.gdpr_erasure_passenger(passenger_id, note)
+    - logs a GDPR request in mobility.gdpr_requests
+    - anonymizes passenger PII in mobility.passengers
+    """
+    if n_requests <= 0 or not passenger_ids:
+        return 0
+
+    chosen = random.sample(passenger_ids, k=min(n_requests, len(passenger_ids)))
+    processed = 0
+
+    for pid in chosen:
+        note = f"generator_erasure pid={pid}"
+        cur.execute("SELECT mobility.gdpr_erasure_passenger(%s, %s);", (pid, note))
+        _request_id = cur.fetchone()[0]
+        processed += 1
+
+    return processed
+
+
+# ============================================================
 # Incremental inserts
 # ============================================================
 
@@ -720,12 +765,11 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
     logging.info(f"Inserting {N_TRIPS} trips...")
     trip_ids = []
 
-    # driver<->vehicle pairs for consistency (and mismatch noise)
     driver_vehicle_pairs = fetch_driver_vehicle_pairs(cur)
     if not driver_vehicle_pairs:
         raise RuntimeError("No vehicles found. Seed drivers/vehicles first.")
 
-    cancel_enum_values = ["passenger", "driver", "system"]  # keep safe with your enum usage
+    cancel_enum_values = ["passenger", "driver", "system"]
 
     for i in range(1, N_TRIPS + 1):
         status = random.choice(["requested", "accepted", "started", "completed", "canceled"])
@@ -737,28 +781,25 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
 
         # Choose driver & vehicle: mostly consistent pair, sometimes mismatch
         if random.random() < VEHICLE_DRIVER_MISMATCH_RATE:
-            # mismatch: pick random driver and random vehicle independently
             driver_id = random.choice(driver_ids)
             vehicle_id = random.choice(vehicle_ids)
         else:
             driver_id, vehicle_id = random.choice(driver_vehicle_pairs)
 
-        # requested trips could be without driver/vehicle sometimes (realistic),
-        # but your schema allows null driver/vehicle.
+        # requested trips often have no driver/vehicle
         if status == "requested":
             if random.random() < 0.9:
                 driver_id = None
                 vehicle_id = None
         elif status == "accepted":
             if random.random() < 0.2:
-                vehicle_id = None  # e.g. assigned driver but vehicle missing
+                vehicle_id = None
 
         start_lat, start_lng, end_lat, end_lng = generate_coords()
 
         estimated_distance, actual_distance = compute_distances_for_status(status)
         fare_amount = maybe_null(maybe_high_precision(round(random.uniform(5, 80), 2)))
 
-        # cancel fields
         cancel_reason = None
         cancel_by = None
         cancel_note = None
@@ -768,11 +809,9 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
             cancel_by = random.choice(cancel_enum_values)
             cancel_note = noisy_cancel_note()
         else:
-            # sometimes you still get garbage cancel_note even when not canceled (integration bug)
             if random.random() < (CANCEL_NOTE_GARBAGE_RATE * 0.1):
                 cancel_note = noisy_cancel_note()
 
-        # ended_at "broken" behavior (keep your original idea)
         ended_at = maybe_null(ended_at) if status in ("completed",) else ended_at
 
         cur.execute(
@@ -874,7 +913,6 @@ def insert_payments(cur, trip_ids):
 def insert_ratings(cur, trip_ids):
     logging.info("Inserting ratings...")
 
-    # Solo viajes que tienen driver asignado (y opcionalmente completed)
     cur.execute(
         """
         SELECT trip_id
@@ -930,7 +968,6 @@ def update_trip_statuses(cur, max_updates=3000):
         new_status = random.choice(["completed", "canceled"])
 
         if new_status == "completed":
-            # ended_at should be >= requested_at
             base = started_at if started_at else requested_at if requested_at else datetime.now()
             ended_at = base + timedelta(minutes=random.randint(5, 40))
 
@@ -942,7 +979,6 @@ def update_trip_statuses(cur, max_updates=3000):
             else:
                 actual_distance = maybe_high_precision(raw_actual)
 
-            # sometimes missing ended_at too
             if random.random() < MISSING_ENDED_AT_ON_COMPLETED_RATE:
                 ended_at = None
 
@@ -958,11 +994,9 @@ def update_trip_statuses(cur, max_updates=3000):
                 (new_status, ended_at, actual_distance, trip_id),
             )
 
-        else:  # canceled
-            # canceled_at should be >= requested_at (no constraint, but keep consistent)
+        else:
             canceled_at = (requested_at or datetime.now()) + timedelta(minutes=random.randint(1, 20))
 
-            # Normally canceled should NOT have distance; keep anomaly A
             raw_candidate = float(estimated_distance) + random.uniform(-2, 5) if estimated_distance else None
             raw_candidate = None if (raw_candidate is not None and raw_candidate < 0) else raw_candidate
 
@@ -1013,17 +1047,22 @@ def main():
         if not zone_ids:
             raise RuntimeError("No zones found. Seed zones before running generator.")
 
-        passenger_ids = fetch_ids(cur, "passengers", "passenger_id")
+        # passengers seed if empty
+        passenger_ids = fetch_active_passenger_ids(cur)
         if not passenger_ids:
-            passenger_ids = seed_passengers(cur)
+            _all_passenger_ids = fetch_ids(cur, "passengers", "passenger_id")
+            if not _all_passenger_ids:
+                passenger_ids = seed_passengers(cur)
+            else:
+                passenger_ids = fetch_active_passenger_ids(cur)
 
-        # --- NEW: grow passengers every run ---
+        # grow passengers every run
         new_passenger_ids = insert_new_passengers(cur, N_NEW_PASSENGERS_PER_RUN)
         if new_passenger_ids:
             logging.info(f"New passengers inserted this run: {len(new_passenger_ids)}")
             passenger_ids.extend(new_passenger_ids)
 
-        # --- NEW: update some existing passengers (moves watermark) ---
+        # update some existing passengers
         n_p_updated = update_existing_passengers(cur, N_PASSENGER_UPDATES_PER_RUN)
         logging.info(f"Passengers updated this run: {n_p_updated}")
 
@@ -1032,7 +1071,7 @@ def main():
         if not driver_ids or not vehicle_ids:
             driver_ids, vehicle_ids = seed_drivers_and_vehicles(cur)
 
-        # --- NEW: grow drivers/vehicles every run ---
+        # grow drivers/vehicles every run
         new_driver_ids, new_vehicle_ids = insert_new_drivers_and_vehicles(cur, N_NEW_DRIVERS_PER_RUN)
         if new_driver_ids:
             logging.info(f"New drivers inserted this run: {len(new_driver_ids)}")
@@ -1041,10 +1080,11 @@ def main():
             logging.info(f"New vehicles inserted this run: {len(new_vehicle_ids)}")
             vehicle_ids.extend(new_vehicle_ids)
 
-        # --- NEW: update some existing drivers (triggers watermark + SCD2) ---
+        # update some existing drivers
         n_updated = update_existing_drivers(cur, N_DRIVER_UPDATES_PER_RUN)
         logging.info(f"Drivers updated this run: {n_updated}")
 
+        # core activity
         trip_ids = insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids)
 
         insert_payments(cur, trip_ids)
@@ -1054,6 +1094,14 @@ def main():
         logging.info("Ratings inserted")
 
         update_trip_statuses(cur, max_updates=3000)
+
+        # --- GDPR erasure simulation sometimes ---
+        if random.random() < GDPR_ERASURE_RATE:
+            active_ids = fetch_active_passenger_ids(cur)
+            n_gdpr = apply_gdpr_erasure_requests(cur, active_ids, N_GDPR_ERASURES_PER_RUN)
+            logging.info(f"GDPR erasures processed this run: {n_gdpr}")
+        else:
+            logging.info("GDPR erasures processed this run: 0")
 
         conn.commit()
         logging.info("OLTP data generation completed successfully")
