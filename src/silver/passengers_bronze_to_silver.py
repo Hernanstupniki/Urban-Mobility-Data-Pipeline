@@ -21,6 +21,10 @@ SILVER_BASE_PATH = f"data/{ENV}/silver/passengers"
 CONTROL_BASE_PATH = f"data/{ENV}/_control"
 ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
+# GDPR configs (simple + aligned to your architecture)
+GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
+GDPR_NULLIFY_CITY = os.getenv("GDPR_NULLIFY_CITY", "0") == "1"  # optional
+
 
 # Delta control helpers
 def ensure_etl_control_table(spark: SparkSession):
@@ -163,6 +167,30 @@ def main():
             )
         )
 
+        # 2.5) GDPR safety belt:
+        # if is_deleted=true, force redaction even if source accidentally sends PII
+        bronze_df = (
+            bronze_df
+            .withColumn(
+                "full_name",
+                when(col("is_deleted") == lit(True), lit(GDPR_ANON_NAME)).otherwise(col("full_name"))
+            )
+            .withColumn(
+                "email",
+                when(col("is_deleted") == lit(True), lit(None).cast("string")).otherwise(col("email"))
+            )
+            .withColumn(
+                "phone",
+                when(col("is_deleted") == lit(True), lit(None).cast("string")).otherwise(col("phone"))
+            )
+        )
+
+        if GDPR_NULLIFY_CITY:
+            bronze_df = bronze_df.withColumn(
+                "city",
+                when(col("is_deleted") == lit(True), lit(None).cast("string")).otherwise(col("city"))
+            )
+
         # Debug / confirmation
         bronze_count = bronze_df.count()
         print(f"[{JOB_NAME}] bronze_df count: {bronze_count}")
@@ -192,7 +220,6 @@ def main():
         )
 
         # 4) Simple quality/enrichment flags
-        # (email format check = very simple; you can tighten later)
         enriched_df = (
             latest_df
             .withColumn("missing_full_name", col("full_name").isNull() | (trim(col("full_name")) == ""))
@@ -237,6 +264,44 @@ def main():
                 .option("overwriteSchema", "true")
                 .save(SILVER_BASE_PATH)
             )
+
+            # 6.1) GDPR backfill on first run too (in case first load already contains is_deleted=true)
+            silver_table = DeltaTable.forPath(spark, SILVER_BASE_PATH)
+
+            gdpr_events_df = (
+                scd_ready_df
+                .filter(col("is_deleted") == lit(True))
+                .select("passenger_id", "deleted_at")
+                .dropDuplicates(["passenger_id"])
+            )
+
+            gdpr_count = gdpr_events_df.count()
+            print(f"[{JOB_NAME}] GDPR passengers in this batch: {gdpr_count}")
+
+            if gdpr_count > 0:
+                deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+                city_expr = "CAST(NULL AS STRING)" if GDPR_NULLIFY_CITY else "t.city"
+
+                (
+                    silver_table.alias("t")
+                    .merge(gdpr_events_df.alias("g"), "t.passenger_id = g.passenger_id")
+                    .whenMatchedUpdate(set={
+                        "full_name": f"'{GDPR_ANON_NAME}'",
+                        "email": "CAST(NULL AS STRING)",
+                        "phone": "CAST(NULL AS STRING)",
+                        "city": city_expr,
+                        "is_deleted": "true",
+                        "deleted_at": deleted_at_expr,
+                        # keep flags consistent
+                        "missing_email": "true",
+                        "missing_phone": "true",
+                        "invalid_email_format": "false",
+                        "missing_full_name": "false",
+                    })
+                    .execute()
+                )
+                print(f"[{JOB_NAME}] GDPR backfill applied to Silver history (first run).")
+
             max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
             upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
             print("Silver passengers table created + etl_control (delta) updated")
@@ -306,6 +371,41 @@ def main():
             })
             .execute()
         )
+
+        # 7.3) GDPR backfill: redact PII for ALL historical versions in Silver
+        gdpr_events_df = (
+            scd_ready_df
+            .filter(col("is_deleted") == lit(True))
+            .select("passenger_id", "deleted_at")
+            .dropDuplicates(["passenger_id"])
+        )
+
+        gdpr_count = gdpr_events_df.count()
+        print(f"[{JOB_NAME}] GDPR passengers in this batch: {gdpr_count}")
+
+        if gdpr_count > 0:
+            deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+            city_expr = "CAST(NULL AS STRING)" if GDPR_NULLIFY_CITY else "t.city"
+
+            (
+                silver_table.alias("t")
+                .merge(gdpr_events_df.alias("g"), "t.passenger_id = g.passenger_id")
+                .whenMatchedUpdate(set={
+                    "full_name": f"'{GDPR_ANON_NAME}'",
+                    "email": "CAST(NULL AS STRING)",
+                    "phone": "CAST(NULL AS STRING)",
+                    "city": city_expr,
+                    "is_deleted": "true",
+                    "deleted_at": deleted_at_expr,
+                    # keep flags consistent
+                    "missing_email": "true",
+                    "missing_phone": "true",
+                    "invalid_email_format": "false",
+                    "missing_full_name": "false",
+                })
+                .execute()
+            )
+            print(f"[{JOB_NAME}] GDPR backfill applied to Silver history.")
 
         # 8) Update watermark
         max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
