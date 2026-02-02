@@ -18,6 +18,12 @@ export N_TRIPS=10000
 export N_PASSENGERS=2000
 export N_DRIVERS=500
 
+# GDPR / RTBF simulation
+export GDPR_ERASURE_RATE=1.0
+export N_GDPR_ERASURES_PER_RUN=10
+export GDPR_ONLY_NON_DELETED=true
+export GDPR_NOTE="simulated_erasure"
+
 # --------------------------------------------------
 # Run generator
 # --------------------------------------------------
