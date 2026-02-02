@@ -1,12 +1,15 @@
 -- ============================================================
--- Urban Mobility OLTP (PostgreSQL) - Schema
+-- Urban Mobility OLTP (PostgreSQL) - Schema (CONSISTENTE)
+-- Schema: mobility
+-- Idempotent: safe to re-run
 -- ============================================================
 
+-- 0) Schema
 CREATE SCHEMA IF NOT EXISTS mobility;
 SET search_path TO mobility;
 
 -- ------------------------------------------------------------
--- 2) Types (enums)
+-- 1) Types (enums)
 -- ------------------------------------------------------------
 DO $$ BEGIN
   CREATE TYPE driver_status AS ENUM ('active','inactive','suspended');
@@ -32,8 +35,13 @@ DO $$ BEGIN
   CREATE TYPE cancellation_reason AS ENUM ('passenger','driver','system','no_show','other');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- GDPR request log type
+DO $$ BEGIN
+  CREATE TYPE gdpr_request_type AS ENUM ('erasure','access','rectification');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ------------------------------------------------------------
--- 3) Core tables
+-- 2) Core tables
 -- ------------------------------------------------------------
 
 -- Passengers (PII allowed in OLTP)
@@ -49,7 +57,7 @@ CREATE TABLE IF NOT EXISTS passengers (
   deleted_at          TIMESTAMPTZ
 );
 
--- Drivers (some PII-ish fields; acceptable in OLTP)
+-- Drivers
 CREATE TABLE IF NOT EXISTS drivers (
   driver_id           BIGSERIAL PRIMARY KEY,
   full_name           TEXT NOT NULL,
@@ -61,7 +69,7 @@ CREATE TABLE IF NOT EXISTS drivers (
   deleted_at          TIMESTAMPTZ
 );
 
--- Vehicles (1 active vehicle per driver is common; keep flexible)
+-- Vehicles
 CREATE TABLE IF NOT EXISTS vehicles (
   vehicle_id          BIGSERIAL PRIMARY KEY,
   driver_id           BIGINT NOT NULL REFERENCES drivers(driver_id),
@@ -75,7 +83,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Zones / locations (optional but useful for analytics & BI)
+-- Zones
 CREATE TABLE IF NOT EXISTS zones (
   zone_id             BIGSERIAL PRIMARY KEY,
   zone_name           TEXT NOT NULL,
@@ -84,38 +92,7 @@ CREATE TABLE IF NOT EXISTS zones (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Seed zones (business-defined catalog - USA cities)
-INSERT INTO zones (zone_name, city, region)
-VALUES
-  ('Manhattan', 'New York', 'NY'),
-  ('Brooklyn', 'New York', 'NY'),
-  ('Queens', 'New York', 'NY'),
-  ('Bronx', 'New York', 'NY'),
-  ('Staten Island', 'New York', 'NY'),
-
-  ('Downtown', 'Los Angeles', 'CA'),
-  ('Hollywood', 'Los Angeles', 'CA'),
-  ('Santa Monica', 'Los Angeles', 'CA'),
-  ('Venice', 'Los Angeles', 'CA'),
-
-  ('Loop', 'Chicago', 'IL'),
-  ('Hyde Park', 'Chicago', 'IL'),
-  ('Lincoln Park', 'Chicago', 'IL'),
-
-  ('Downtown', 'San Francisco', 'CA'),
-  ('Mission District', 'San Francisco', 'CA'),
-  ('SoMa', 'San Francisco', 'CA'),
-
-  ('Downtown', 'Austin', 'TX'),
-  ('South Congress', 'Austin', 'TX'),
-  ('East Austin', 'Austin', 'TX'),
-
-  ('Downtown', 'Miami', 'FL'),
-  ('Brickell', 'Miami', 'FL'),
-  ('Wynwood', 'Miami', 'FL')
-ON CONFLICT DO NOTHING;
-
--- Trips (heart of OLTP; lots of updates)
+-- Trips
 CREATE TABLE IF NOT EXISTS trips (
   trip_id             BIGSERIAL PRIMARY KEY,
 
@@ -150,7 +127,6 @@ CREATE TABLE IF NOT EXISTS trips (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-  -- Basic consistency checks (lightweight; deeper checks go in ETL / quality jobs)
   CONSTRAINT trips_time_order_chk CHECK (
     (accepted_at IS NULL OR accepted_at >= requested_at)
     AND (started_at  IS NULL OR started_at  >= requested_at)
@@ -158,7 +134,7 @@ CREATE TABLE IF NOT EXISTS trips (
   )
 );
 
--- Payments (can be 1:1 with trip, but allow multiple attempts if needed)
+-- Payments
 CREATE TABLE IF NOT EXISTS payments (
   payment_id          BIGSERIAL PRIMARY KEY,
   trip_id             BIGINT NOT NULL REFERENCES trips(trip_id),
@@ -180,14 +156,11 @@ CREATE TABLE IF NOT EXISTS ratings (
   driver_id           BIGINT NOT NULL REFERENCES drivers(driver_id),
   score               SMALLINT NOT NULL CHECK (score BETWEEN 1 AND 5),
   comment             TEXT,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- GDPR request log (optional but great for portfolio)
-DO $$ BEGIN
-  CREATE TYPE gdpr_request_type AS ENUM ('erasure','access','rectification');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
+-- GDPR request log
 CREATE TABLE IF NOT EXISTS gdpr_requests (
   request_id          BIGSERIAL PRIMARY KEY,
   passenger_id        BIGINT REFERENCES passengers(passenger_id),
@@ -199,21 +172,57 @@ CREATE TABLE IF NOT EXISTS gdpr_requests (
 );
 
 -- ------------------------------------------------------------
--- 5) Indexes (performance for OLTP + incrementals)
+-- 3) Seed zones (idempotent)
+-- ------------------------------------------------------------
+INSERT INTO zones (zone_name, city, region)
+VALUES
+  ('Manhattan', 'New York', 'NY'),
+  ('Brooklyn', 'New York', 'NY'),
+  ('Queens', 'New York', 'NY'),
+  ('Bronx', 'New York', 'NY'),
+  ('Staten Island', 'New York', 'NY'),
+
+  ('Downtown', 'Los Angeles', 'CA'),
+  ('Hollywood', 'Los Angeles', 'CA'),
+  ('Santa Monica', 'Los Angeles', 'CA'),
+  ('Venice', 'Los Angeles', 'CA'),
+
+  ('Loop', 'Chicago', 'IL'),
+  ('Hyde Park', 'Chicago', 'IL'),
+  ('Lincoln Park', 'Chicago', 'IL'),
+
+  ('Downtown', 'San Francisco', 'CA'),
+  ('Mission District', 'San Francisco', 'CA'),
+  ('SoMa', 'San Francisco', 'CA'),
+
+  ('Downtown', 'Austin', 'TX'),
+  ('South Congress', 'Austin', 'TX'),
+  ('East Austin', 'Austin', 'TX'),
+
+  ('Downtown', 'Miami', 'FL'),
+  ('Brickell', 'Miami', 'FL'),
+  ('Wynwood', 'Miami', 'FL')
+ON CONFLICT DO NOTHING;
+
+-- ------------------------------------------------------------
+-- 4) Indexes
 -- ------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_trips_requested_at   ON trips(requested_at);
 CREATE INDEX IF NOT EXISTS idx_trips_updated_at     ON trips(updated_at);
 CREATE INDEX IF NOT EXISTS idx_trips_status         ON trips(status);
 CREATE INDEX IF NOT EXISTS idx_trips_driver         ON trips(driver_id);
 CREATE INDEX IF NOT EXISTS idx_trips_passenger      ON trips(passenger_id);
+
 CREATE INDEX IF NOT EXISTS idx_payments_trip        ON payments(trip_id);
 CREATE INDEX IF NOT EXISTS idx_payments_updated_at  ON payments(updated_at);
+
 CREATE INDEX IF NOT EXISTS idx_ratings_driver       ON ratings(driver_id);
+
 CREATE INDEX IF NOT EXISTS idx_passengers_updated   ON passengers(updated_at);
 CREATE INDEX IF NOT EXISTS idx_drivers_updated      ON drivers(updated_at);
 
 -- ------------------------------------------------------------
--- 6) Updated_at auto-maintenance (trigger)
+-- 5) updated_at auto-maintenance (trigger)
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
@@ -223,6 +232,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Base triggers (idempotent)
 DO $$ BEGIN
   CREATE TRIGGER trg_passengers_updated
   BEFORE UPDATE ON passengers
@@ -254,7 +264,17 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ------------------------------------------------------------
--- 7) Helpful views (optional)
+-- 6) Ratings: add updated_at + trigger (TU CAMBIO)
+-- ------------------------------------------------------------
+-- trigger for ratings (idempotent)
+DO $$ BEGIN
+  CREATE TRIGGER trg_ratings_updated
+  BEFORE UPDATE ON ratings
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ------------------------------------------------------------
+-- 7) Helpful view (optional)
 -- ------------------------------------------------------------
 CREATE OR REPLACE VIEW v_trip_kpis AS
 SELECT
@@ -270,12 +290,106 @@ SELECT
   t.actual_distance_km
 FROM trips t;
 
-ALTER TABLE mobility.ratings
-ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- ------------------------------------------------------------
+-- 8) MINIMO GDPR en OLTP (anonimizar pasajero)
+--    - No borra trips/payments/ratings (no rompe FKs)
+--    - Marca is_deleted/deleted_at y pisa PII en passengers
+--    - Registra la solicitud en gdpr_requests
+-- ------------------------------------------------------------
 
-CREATE TRIGGER trg_ratings_updated
-BEFORE UPDATE ON ratings
-FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- helper: function to anonymize a passenger and mark gdpr request processed
+CREATE OR REPLACE FUNCTION mobility.gdpr_anonymize_passenger(p_passenger_id BIGINT, p_note TEXT DEFAULT NULL)
+RETURNS VOID AS $$
+BEGIN
+  -- 1) create request (erasure) as pending
+  INSERT INTO mobility.gdpr_requests (passenger_id, request_type, status, note)
+  VALUES (p_passenger_id, 'erasure', 'pending', p_note);
+
+  -- 2) anonymize passenger record (keep row for FK integrity)
+  UPDATE mobility.passengers
+  SET
+    full_name  = '[deleted]',
+    email      = NULL,
+    phone      = NULL,
+    city       = NULL,
+    is_deleted = TRUE,
+    deleted_at = now(),
+    updated_at = now()
+  WHERE passenger_id = p_passenger_id;
+
+  -- 3) mark latest request as processed
+  UPDATE mobility.gdpr_requests
+  SET status = 'processed', processed_at = now()
+  WHERE request_id = (
+    SELECT request_id
+    FROM mobility.gdpr_requests
+    WHERE passenger_id = p_passenger_id
+      AND request_type = 'erasure'
+    ORDER BY requested_at DESC
+    LIMIT 1
+  );
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- Minimal GDPR mechanism (OLTP) - anonymize + log request
+-- Keeps referential integrity (no deletes)
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION mobility.gdpr_erasure_passenger(
+  p_passenger_id BIGINT,
+  p_note TEXT DEFAULT NULL
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_request_id BIGINT;
+  v_exists BOOLEAN;
+BEGIN
+  -- Check passenger exists
+  SELECT EXISTS(
+    SELECT 1 FROM mobility.passengers WHERE passenger_id = p_passenger_id
+  )
+  INTO v_exists;
+
+  IF NOT v_exists THEN
+    INSERT INTO mobility.gdpr_requests (passenger_id, request_type, requested_at, processed_at, status, note)
+    VALUES (p_passenger_id, 'erasure', now(), now(), 'rejected', COALESCE(p_note,'passenger_not_found'))
+    RETURNING request_id INTO v_request_id;
+
+    RETURN v_request_id;
+  END IF;
+
+  -- Log request as pending
+  INSERT INTO mobility.gdpr_requests (passenger_id, request_type, requested_at, status, note)
+  VALUES (p_passenger_id, 'erasure', now(), 'pending', p_note)
+  RETURNING request_id INTO v_request_id;
+
+  -- Anonymize passenger PII (DO NOT DELETE ROW)
+  -- full_name is NOT NULL -> keep placeholder.
+  -- email is UNIQUE but allows NULL -> OK.
+  UPDATE mobility.passengers
+  SET
+    full_name  = 'ANONYMIZED',
+    email      = NULL,
+    phone      = NULL,
+    city       = NULL,
+    is_deleted = TRUE,
+    deleted_at = now()
+  WHERE passenger_id = p_passenger_id;
+
+  -- updated_at gets set by your trigger set_updated_at()
+
+  -- Mark request as processed
+  UPDATE mobility.gdpr_requests
+  SET processed_at = now(),
+      status = 'processed'
+  WHERE request_id = v_request_id;
+
+  RETURN v_request_id;
+END;
+$$;
+
 
 -- Done
-
