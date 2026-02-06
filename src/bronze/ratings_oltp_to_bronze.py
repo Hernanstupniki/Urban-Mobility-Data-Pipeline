@@ -5,11 +5,13 @@ import uuid
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, lit, current_timestamp,
-    max as spark_max, to_date, coalesce
+    max as spark_max, to_date
 )
 from delta.tables import DeltaTable
 
+# ============================================================
 # Config
+# ============================================================
 JOB_NAME = "ratings_oltp_to_bronze"
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -27,7 +29,9 @@ CONTROL_BASE_PATH = f"data/{ENV}/_control"
 ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
 
+# ============================================================
 # Delta control helpers
+# ============================================================
 def ensure_etl_control_table(spark: SparkSession):
     if DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return
@@ -94,7 +98,9 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
     )
 
 
+# ============================================================
 # Main
+# ============================================================
 def main():
     spark = (
         SparkSession.builder
@@ -111,11 +117,11 @@ def main():
     spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
 
     try:
-        # 1) Watermark desde Delta control table (created_at en ratings)
+        # 1) Watermark desde Delta control table (UPDATED_AT en ratings)
         last_loaded_ts = read_last_loaded_ts(spark)
-        print(f"[{JOB_NAME}] last_loaded_ts(created_at): {last_loaded_ts}")
+        print(f"[{JOB_NAME}] last_loaded_ts(updated_at): {last_loaded_ts}")
 
-        # 2) Read incremental ratings from OLTP (watermark = created_at)
+        # 2) Read incremental ratings from OLTP (watermark = updated_at)
         ratings_df = (
             spark.read.format("jdbc")
             .option("url", JDBC_URL)
@@ -124,7 +130,7 @@ def main():
             .option("password", DB_PASSWORD)
             .option("driver", "org.postgresql.Driver")
             .load()
-            .filter(col("created_at") > lit(last_loaded_ts))
+            .filter(col("updated_at") > lit(last_loaded_ts))
         )
 
         if ratings_df.rdd.isEmpty():
@@ -153,10 +159,10 @@ def main():
         )
 
         row_count = ratings_df.count()
-        max_ts = ratings_df.select(spark_max("created_at")).first()[0]
+        max_ts = ratings_df.select(spark_max("updated_at")).first()[0]
 
         print(f"Wrote {row_count} ratings to Bronze (Delta)")
-        print(f"[{JOB_NAME}] new watermark(created_at): {max_ts}")
+        print(f"[{JOB_NAME}] new watermark(updated_at): {max_ts}")
 
         # 5) Update watermark en Delta control table
         upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
