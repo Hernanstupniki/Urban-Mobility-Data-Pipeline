@@ -1,6 +1,6 @@
 """
-OLTP Data Generator – Urban Mobility
------------------------------------
+OLTP Data Generator – Urban Mobility (PLUS: GDPR extended)
+---------------------------------------------------------
 Purpose:
 - Simulate a living OLTP system (real app behavior)
 - Generate incremental operational data
@@ -9,16 +9,27 @@ Purpose:
 IMPORTANT:
 - This is NOT ETL
 - OLTP constraints must be respected
+
+PLUS additions:
+- GDPR erasure simulation for:
+  - passengers (full_name/email/phone + accidental PII scrub)
+  - drivers (full_name/license_number + vehicle plate anonymization + accidental PII scrub)
+  - vehicles (plate anonymization + accidental PII scrub)
+- Generate "accidental PII" fields so GDPR actually does something:
+  - ratings.comment
+  - payments.provider_ref
+- Avoid using/updating soft-deleted entities for new activity
 """
 
 import os
 import random
 import logging
+import uuid
 from datetime import datetime, timedelta
 
 import psycopg2
-from psycopg2 import errors
 from faker import Faker
+
 
 # ============================================================
 # Configuration (env-driven)
@@ -45,15 +56,15 @@ LOG_EVERY = int(os.getenv("LOG_EVERY", "5000"))
 # --- Rates to control your Silver flag has_distance_in_invalid_status ---
 INVALID_DISTANCE_IN_WRONG_STATUS_RATE = float(
     os.getenv("INVALID_DISTANCE_IN_WRONG_STATUS_RATE", "0.01")
-)  # A: accepted/canceled with distance
+)  # accepted/canceled with distance
 MISSING_DISTANCE_ON_COMPLETED_RATE = float(
     os.getenv("MISSING_DISTANCE_ON_COMPLETED_RATE", "0.02")
-)  # B: completed but distance is NULL
+)  # completed but actual_distance is NULL
 MISSING_DISTANCE_ON_STARTED_RATE = float(
     os.getenv("MISSING_DISTANCE_ON_STARTED_RATE", "0.01")
 )
 
-# --- New "noise" knobs ---
+# --- cancel_note noise knobs ---
 CANCEL_NOTE_GARBAGE_RATE = float(os.getenv("CANCEL_NOTE_GARBAGE_RATE", "0.20"))
 CANCEL_NOTE_NULLLIKE_RATE = float(os.getenv("CANCEL_NOTE_NULLLIKE_RATE", "0.10"))
 CANCEL_NOTE_EMPTY_STRING_RATE = float(os.getenv("CANCEL_NOTE_EMPTY_STRING_RATE", "0.05"))
@@ -69,17 +80,25 @@ HIGH_PRECISION_NUMERIC_RATE = float(os.getenv("HIGH_PRECISION_NUMERIC_RATE", "0.
 MISSING_ENDED_AT_ON_COMPLETED_RATE = float(os.getenv("MISSING_ENDED_AT_ON_COMPLETED_RATE", "0.02"))
 
 # --- Driver growth / changes per run ---
-N_NEW_DRIVERS_PER_RUN = int(os.getenv("N_NEW_DRIVERS_PER_RUN", "25"))         # nuevos por corrida
-N_DRIVER_UPDATES_PER_RUN = int(os.getenv("N_DRIVER_UPDATES_PER_RUN", "60"))   # updates por corrida
+N_NEW_DRIVERS_PER_RUN = int(os.getenv("N_NEW_DRIVERS_PER_RUN", "25"))
+N_DRIVER_UPDATES_PER_RUN = int(os.getenv("N_DRIVER_UPDATES_PER_RUN", "60"))
 DRIVER_STATUS_CHANGE_RATE = float(os.getenv("DRIVER_STATUS_CHANGE_RATE", "0.30"))
 
 # --- Passenger growth / changes per run ---
-N_NEW_PASSENGERS_PER_RUN = int(os.getenv("N_NEW_PASSENGERS_PER_RUN", "80"))         # nuevos por corrida
-N_PASSENGER_UPDATES_PER_RUN = int(os.getenv("N_PASSENGER_UPDATES_PER_RUN", "200"))  # updates por corrida
+N_NEW_PASSENGERS_PER_RUN = int(os.getenv("N_NEW_PASSENGERS_PER_RUN", "80"))
+N_PASSENGER_UPDATES_PER_RUN = int(os.getenv("N_PASSENGER_UPDATES_PER_RUN", "200"))
 
 # --- GDPR / RTBF simulation (OLTP-only) ---
-GDPR_ERASURE_RATE = float(os.getenv("GDPR_ERASURE_RATE", "0.10"))  # 10% de las corridas aplican GDPR
-N_GDPR_ERASURES_PER_RUN = int(os.getenv("N_GDPR_ERASURES_PER_RUN", "2"))
+GDPR_ERASURE_RATE = float(os.getenv("GDPR_ERASURE_RATE", "0.10"))  # % of runs that trigger GDPR
+
+N_GDPR_PASSENGER_ERASURES_PER_RUN = int(os.getenv("N_GDPR_PASSENGER_ERASURES_PER_RUN", "2"))
+N_GDPR_DRIVER_ERASURES_PER_RUN = int(os.getenv("N_GDPR_DRIVER_ERASURES_PER_RUN", "1"))
+N_GDPR_VEHICLE_ERASURES_PER_RUN = int(os.getenv("N_GDPR_VEHICLE_ERASURES_PER_RUN", "1"))
+
+# --- Accidental PII simulation ---
+RATINGS_COMMENT_RATE = float(os.getenv("RATINGS_COMMENT_RATE", "0.25"))           # % ratings with comment
+RATINGS_COMMENT_PII_RATE = float(os.getenv("RATINGS_COMMENT_PII_RATE", "0.05"))   # % comments with accidental PII
+PAYMENT_PROVIDER_REF_RATE = float(os.getenv("PAYMENT_PROVIDER_REF_RATE", "0.30")) # % payments with provider_ref
 
 
 # ============================================================
@@ -94,6 +113,10 @@ logging.basicConfig(
 )
 
 
+# ============================================================
+# Basic helpers
+# ============================================================
+
 def maybe_null(value, rate=BROKEN_RATE):
     return None if random.random() < rate else value
 
@@ -102,28 +125,108 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
+def get_table_columns(cur, table_name: str):
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'mobility'
+          AND table_name = %s
+        """,
+        (table_name,),
+    )
+    return {r[0] for r in cur.fetchall()}
+
+
 def fetch_ids(cur, table, id_col):
     cur.execute(f"SELECT {id_col} FROM mobility.{table}")
     return [r[0] for r in cur.fetchall()]
 
 
+# ============================================================
+# Active/soft-delete aware fetch helpers
+# ============================================================
+
 def fetch_active_passenger_ids(cur):
-    cur.execute("""
-        SELECT passenger_id
-        FROM mobility.passengers
-        WHERE is_deleted = FALSE
-    """)
+    passengers_cols = get_table_columns(cur, "passengers")
+    if "is_deleted" in passengers_cols:
+        cur.execute("""
+            SELECT passenger_id
+            FROM mobility.passengers
+            WHERE is_deleted = FALSE
+        """)
+    else:
+        cur.execute("SELECT passenger_id FROM mobility.passengers")
+    return [r[0] for r in cur.fetchall()]
+
+
+def fetch_active_driver_ids(cur):
+    drivers_cols = get_table_columns(cur, "drivers")
+    if "is_deleted" in drivers_cols:
+        cur.execute("""
+            SELECT driver_id
+            FROM mobility.drivers
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
+        """)
+    else:
+        cur.execute("SELECT driver_id FROM mobility.drivers")
+    return [r[0] for r in cur.fetchall()]
+
+
+def fetch_active_vehicle_ids(cur):
+    vehicles_cols = get_table_columns(cur, "vehicles")
+    if "is_deleted" in vehicles_cols:
+        cur.execute("""
+            SELECT vehicle_id
+            FROM mobility.vehicles
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
+        """)
+    else:
+        cur.execute("SELECT vehicle_id FROM mobility.vehicles")
     return [r[0] for r in cur.fetchall()]
 
 
 def fetch_driver_vehicle_pairs(cur):
     """
     Returns list of tuples: (driver_id, vehicle_id) for existing vehicles.
-    Useful to generate consistent driver<->vehicle combos, and mismatch on purpose.
+    Prefer active (non-deleted) pairs when soft-delete columns exist.
     """
-    cur.execute("SELECT driver_id, vehicle_id FROM mobility.vehicles")
+    drivers_cols = get_table_columns(cur, "drivers")
+    vehicles_cols = get_table_columns(cur, "vehicles")
+
+    has_driver_deleted = "is_deleted" in drivers_cols
+    has_vehicle_deleted = "is_deleted" in vehicles_cols
+
+    if has_driver_deleted and has_vehicle_deleted:
+        cur.execute("""
+            SELECT v.driver_id, v.vehicle_id
+            FROM mobility.vehicles v
+            JOIN mobility.drivers d ON d.driver_id = v.driver_id
+            WHERE COALESCE(v.is_deleted, FALSE) = FALSE
+              AND COALESCE(d.is_deleted, FALSE) = FALSE
+        """)
+    elif has_driver_deleted:
+        cur.execute("""
+            SELECT v.driver_id, v.vehicle_id
+            FROM mobility.vehicles v
+            JOIN mobility.drivers d ON d.driver_id = v.driver_id
+            WHERE COALESCE(d.is_deleted, FALSE) = FALSE
+        """)
+    elif has_vehicle_deleted:
+        cur.execute("""
+            SELECT driver_id, vehicle_id
+            FROM mobility.vehicles
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
+        """)
+    else:
+        cur.execute("SELECT driver_id, vehicle_id FROM mobility.vehicles")
+
     return cur.fetchall()
 
+
+# ============================================================
+# Noise helpers
+# ============================================================
 
 def maybe_high_precision(value, max_extra_decimals=6):
     """
@@ -200,7 +303,7 @@ def generate_coords():
 def compute_times_for_status(status: str):
     """
     Returns (requested_at, accepted_at, started_at, ended_at, canceled_at)
-    respecting your trips_time_order_chk:
+    respecting trips_time_order_chk:
       accepted_at >= requested_at (if not null)
       started_at  >= requested_at (if not null)
       ended_at    >= requested_at (if not null)
@@ -287,20 +390,29 @@ def compute_distances_for_status(status: str):
 
 
 # ============================================================
-# Schema introspection helpers
+# Accidental PII simulation helpers
 # ============================================================
 
-def get_table_columns(cur, table_name: str):
-    cur.execute(
-        """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'mobility'
-          AND table_name = %s
-        """,
-        (table_name,),
-    )
-    return {r[0] for r in cur.fetchall()}
+def fake_provider_ref():
+    return f"gw_{uuid.uuid4().hex[:16]}"
+
+
+def noisy_rating_comment():
+    if random.random() > RATINGS_COMMENT_RATE:
+        return None
+
+    base = random.choice([
+        "Great driver!",
+        "Car was clean.",
+        "Too much delay.",
+        fake.sentence(nb_words=10),
+    ])
+
+    # accidental PII simulation
+    if random.random() < RATINGS_COMMENT_PII_RATE:
+        base += " | contact: " + random.choice([fake.email(), fake.phone_number(), fake.name()])
+
+    return base
 
 
 # ============================================================
@@ -555,18 +667,32 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
 def update_existing_drivers(cur, max_updates: int):
     """
-    Updates random existing drivers so updated_at moves.
+    Updates random existing active drivers so updated_at moves.
     Tries to update columns that exist: status, full_name, etc.
     """
     if max_updates <= 0:
         return 0
 
     drivers_cols = get_table_columns(cur, "drivers")
+    has_deleted = "is_deleted" in drivers_cols
 
-    cur.execute(
-        "SELECT driver_id FROM mobility.drivers ORDER BY random() LIMIT %s",
-        (max_updates,),
-    )
+    if has_deleted:
+        cur.execute(
+            """
+            SELECT driver_id
+            FROM mobility.drivers
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
+            ORDER BY random()
+            LIMIT %s
+            """,
+            (max_updates,),
+        )
+    else:
+        cur.execute(
+            "SELECT driver_id FROM mobility.drivers ORDER BY random() LIMIT %s",
+            (max_updates,),
+        )
+
     driver_ids = [r[0] for r in cur.fetchall()]
     if not driver_ids:
         return 0
@@ -685,18 +811,32 @@ def insert_new_passengers(cur, n_new: int):
 
 def update_existing_passengers(cur, max_updates: int):
     """
-    Updates random passengers so updated_at moves.
+    Updates random active passengers so updated_at moves.
     SAFE: does NOT update email (UNIQUE) to avoid collisions.
     """
     if max_updates <= 0:
         return 0
 
     passengers_cols = get_table_columns(cur, "passengers")
+    has_deleted = "is_deleted" in passengers_cols
 
-    cur.execute(
-        "SELECT passenger_id FROM mobility.passengers ORDER BY random() LIMIT %s",
-        (max_updates,),
-    )
+    if has_deleted:
+        cur.execute(
+            """
+            SELECT passenger_id
+            FROM mobility.passengers
+            WHERE is_deleted = FALSE
+            ORDER BY random()
+            LIMIT %s
+            """,
+            (max_updates,),
+        )
+    else:
+        cur.execute(
+            "SELECT passenger_id FROM mobility.passengers ORDER BY random() LIMIT %s",
+            (max_updates,),
+        )
+
     passenger_ids = [r[0] for r in cur.fetchall()]
     if not passenger_ids:
         return 0
@@ -733,14 +873,15 @@ def update_existing_passengers(cur, max_updates: int):
 
 
 # ============================================================
-# GDPR (OLTP-only)
+# GDPR (OLTP-only) – call your OLTP functions
 # ============================================================
 
-def apply_gdpr_erasure_requests(cur, passenger_ids, n_requests: int):
+def apply_gdpr_passenger_erasure_requests(cur, passenger_ids, n_requests: int):
     """
-    Calls the OLTP function mobility.gdpr_erasure_passenger(passenger_id, note)
-    - logs a GDPR request in mobility.gdpr_requests
-    - anonymizes passenger PII in mobility.passengers
+    Calls mobility.gdpr_erasure_passenger(passenger_id, note)
+    - logs GDPR request
+    - anonymizes passenger PII
+    - scrubs accidental PII in related tables (as per your function)
     """
     if n_requests <= 0 or not passenger_ids:
         return 0
@@ -749,8 +890,50 @@ def apply_gdpr_erasure_requests(cur, passenger_ids, n_requests: int):
     processed = 0
 
     for pid in chosen:
-        note = f"generator_erasure pid={pid}"
+        note = f"generator_erasure passenger_id={pid}"
         cur.execute("SELECT mobility.gdpr_erasure_passenger(%s, %s);", (pid, note))
+        _request_id = cur.fetchone()[0]
+        processed += 1
+
+    return processed
+
+
+def apply_gdpr_driver_erasure_requests(cur, driver_ids, n_requests: int):
+    """
+    Calls mobility.gdpr_erasure_driver(driver_id, note)
+    - anonymizes driver PII + vehicle plates for that driver
+    - scrubs accidental PII (ratings.comment, trips.cancel_note, payments.provider_ref)
+    """
+    if n_requests <= 0 or not driver_ids:
+        return 0
+
+    chosen = random.sample(driver_ids, k=min(n_requests, len(driver_ids)))
+    processed = 0
+
+    for did in chosen:
+        note = f"generator_erasure driver_id={did}"
+        cur.execute("SELECT mobility.gdpr_erasure_driver(%s, %s);", (did, note))
+        _request_id = cur.fetchone()[0]
+        processed += 1
+
+    return processed
+
+
+def apply_gdpr_vehicle_erasure_requests(cur, vehicle_ids, n_requests: int):
+    """
+    Calls mobility.gdpr_erasure_vehicle(vehicle_id, note)
+    - anonymizes plate_number
+    - scrubs accidental PII in trips/payments for that vehicle
+    """
+    if n_requests <= 0 or not vehicle_ids:
+        return 0
+
+    chosen = random.sample(vehicle_ids, k=min(n_requests, len(vehicle_ids)))
+    processed = 0
+
+    for vid in chosen:
+        note = f"generator_erasure vehicle_id={vid}"
+        cur.execute("SELECT mobility.gdpr_erasure_vehicle(%s, %s);", (vid, note))
         _request_id = cur.fetchone()[0]
         processed += 1
 
@@ -767,7 +950,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
 
     driver_vehicle_pairs = fetch_driver_vehicle_pairs(cur)
     if not driver_vehicle_pairs:
-        raise RuntimeError("No vehicles found. Seed drivers/vehicles first.")
+        raise RuntimeError("No active driver/vehicle pairs found. Seed drivers/vehicles first.")
 
     cancel_enum_values = ["passenger", "driver", "system"]
 
@@ -780,7 +963,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
         dropoff_zone_id = random.choice(zone_ids)
 
         # Choose driver & vehicle: mostly consistent pair, sometimes mismatch
-        if random.random() < VEHICLE_DRIVER_MISMATCH_RATE:
+        if random.random() < VEHICLE_DRIVER_MISMATCH_RATE and driver_ids and vehicle_ids:
             driver_id = random.choice(driver_ids)
             vehicle_id = random.choice(vehicle_ids)
         else:
@@ -894,24 +1077,50 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids):
 
 def insert_payments(cur, trip_ids):
     logging.info("Inserting payments...")
+
+    payments_cols = get_table_columns(cur, "payments")
+    has_provider_ref = "provider_ref" in payments_cols
+
     for trip_id in trip_ids:
         if random.random() < 0.8:
-            cur.execute(
-                """
-                INSERT INTO mobility.payments (trip_id, method, status, amount)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (
-                    trip_id,
-                    random.choice(["cash", "card", "wallet"]),
-                    random.choice(["paid", "failed", "pending"]),
-                    round(random.uniform(5, 80), 2),
-                ),
-            )
+            provider_ref = None
+            if has_provider_ref and random.random() < PAYMENT_PROVIDER_REF_RATE:
+                provider_ref = fake_provider_ref()
+
+            if has_provider_ref:
+                cur.execute(
+                    """
+                    INSERT INTO mobility.payments (trip_id, method, status, amount, provider_ref)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        trip_id,
+                        random.choice(["cash", "card", "wallet"]),
+                        random.choice(["paid", "failed", "pending"]),
+                        round(random.uniform(5, 80), 2),
+                        provider_ref,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO mobility.payments (trip_id, method, status, amount)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        trip_id,
+                        random.choice(["cash", "card", "wallet"]),
+                        random.choice(["paid", "failed", "pending"]),
+                        round(random.uniform(5, 80), 2),
+                    ),
+                )
 
 
 def insert_ratings(cur, trip_ids):
     logging.info("Inserting ratings...")
+
+    ratings_cols = get_table_columns(cur, "ratings")
+    has_comment = "comment" in ratings_cols
 
     cur.execute(
         """
@@ -933,17 +1142,30 @@ def insert_ratings(cur, trip_ids):
     rated = random.sample(eligible_trip_ids, k=int(len(eligible_trip_ids) * 0.6))
 
     for trip_id in rated:
-        cur.execute(
-            """
-            INSERT INTO mobility.ratings (trip_id, passenger_id, driver_id, score)
-            SELECT t.trip_id, t.passenger_id, t.driver_id, %s
-            FROM mobility.trips t
-            WHERE t.trip_id = %s
-              AND t.driver_id IS NOT NULL
-              AND t.passenger_id IS NOT NULL
-            """,
-            (random.randint(1, 5), trip_id),
-        )
+        if has_comment:
+            cur.execute(
+                """
+                INSERT INTO mobility.ratings (trip_id, passenger_id, driver_id, score, comment)
+                SELECT t.trip_id, t.passenger_id, t.driver_id, %s, %s
+                FROM mobility.trips t
+                WHERE t.trip_id = %s
+                  AND t.driver_id IS NOT NULL
+                  AND t.passenger_id IS NOT NULL
+                """,
+                (random.randint(1, 5), noisy_rating_comment(), trip_id),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO mobility.ratings (trip_id, passenger_id, driver_id, score)
+                SELECT t.trip_id, t.passenger_id, t.driver_id, %s
+                FROM mobility.trips t
+                WHERE t.trip_id = %s
+                  AND t.driver_id IS NOT NULL
+                  AND t.passenger_id IS NOT NULL
+                """,
+                (random.randint(1, 5), trip_id),
+            )
 
 
 def update_trip_statuses(cur, max_updates=3000):
@@ -1037,7 +1259,7 @@ def update_trip_statuses(cur, max_updates=3000):
 # ============================================================
 
 def main():
-    logging.info("Starting OLTP data generation")
+    logging.info("Starting OLTP data generation (PLUS GDPR)")
 
     conn = get_connection()
     cur = conn.cursor()
@@ -1047,7 +1269,9 @@ def main():
         if not zone_ids:
             raise RuntimeError("No zones found. Seed zones before running generator.")
 
-        # passengers seed if empty
+        # ----------------------------
+        # PASSENGERS (seed/grow/update)
+        # ----------------------------
         passenger_ids = fetch_active_passenger_ids(cur)
         if not passenger_ids:
             _all_passenger_ids = fetch_ids(cur, "passengers", "passenger_id")
@@ -1056,22 +1280,25 @@ def main():
             else:
                 passenger_ids = fetch_active_passenger_ids(cur)
 
-        # grow passengers every run
         new_passenger_ids = insert_new_passengers(cur, N_NEW_PASSENGERS_PER_RUN)
         if new_passenger_ids:
             logging.info(f"New passengers inserted this run: {len(new_passenger_ids)}")
             passenger_ids.extend(new_passenger_ids)
 
-        # update some existing passengers
         n_p_updated = update_existing_passengers(cur, N_PASSENGER_UPDATES_PER_RUN)
         logging.info(f"Passengers updated this run: {n_p_updated}")
 
-        driver_ids = fetch_ids(cur, "drivers", "driver_id")
-        vehicle_ids = fetch_ids(cur, "vehicles", "vehicle_id")
+        # ----------------------------
+        # DRIVERS + VEHICLES (seed/grow/update)
+        # ----------------------------
+        driver_ids = fetch_active_driver_ids(cur)
+        vehicle_ids = fetch_active_vehicle_ids(cur)
         if not driver_ids or not vehicle_ids:
             driver_ids, vehicle_ids = seed_drivers_and_vehicles(cur)
+            # ensure we only keep active after seed
+            driver_ids = fetch_active_driver_ids(cur)
+            vehicle_ids = fetch_active_vehicle_ids(cur)
 
-        # grow drivers/vehicles every run
         new_driver_ids, new_vehicle_ids = insert_new_drivers_and_vehicles(cur, N_NEW_DRIVERS_PER_RUN)
         if new_driver_ids:
             logging.info(f"New drivers inserted this run: {len(new_driver_ids)}")
@@ -1080,11 +1307,19 @@ def main():
             logging.info(f"New vehicles inserted this run: {len(new_vehicle_ids)}")
             vehicle_ids.extend(new_vehicle_ids)
 
-        # update some existing drivers
-        n_updated = update_existing_drivers(cur, N_DRIVER_UPDATES_PER_RUN)
-        logging.info(f"Drivers updated this run: {n_updated}")
+        n_d_updated = update_existing_drivers(cur, N_DRIVER_UPDATES_PER_RUN)
+        logging.info(f"Drivers updated this run: {n_d_updated}")
 
-        # core activity
+        # Keep lists clean (avoid deleted ones if GDPR ran previously)
+        passenger_ids = fetch_active_passenger_ids(cur)
+        driver_ids = fetch_active_driver_ids(cur)
+        vehicle_ids = fetch_active_vehicle_ids(cur)
+
+        # ----------------------------
+        # CORE ACTIVITY
+        # ----------------------------
+        if not passenger_ids:
+            raise RuntimeError("No active passengers available for trips.")
         trip_ids = insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids)
 
         insert_payments(cur, trip_ids)
@@ -1095,11 +1330,19 @@ def main():
 
         update_trip_statuses(cur, max_updates=3000)
 
-        # --- GDPR erasure simulation sometimes ---
+        # ----------------------------
+        # GDPR erasure simulation sometimes
+        # ----------------------------
         if random.random() < GDPR_ERASURE_RATE:
-            active_ids = fetch_active_passenger_ids(cur)
-            n_gdpr = apply_gdpr_erasure_requests(cur, active_ids, N_GDPR_ERASURES_PER_RUN)
-            logging.info(f"GDPR erasures processed this run: {n_gdpr}")
+            active_passengers = fetch_active_passenger_ids(cur)
+            active_drivers = fetch_active_driver_ids(cur)
+            active_vehicles = fetch_active_vehicle_ids(cur)
+
+            n_gp = apply_gdpr_passenger_erasure_requests(cur, active_passengers, N_GDPR_PASSENGER_ERASURES_PER_RUN)
+            n_gd = apply_gdpr_driver_erasure_requests(cur, active_drivers, N_GDPR_DRIVER_ERASURES_PER_RUN)
+            n_gv = apply_gdpr_vehicle_erasure_requests(cur, active_vehicles, N_GDPR_VEHICLE_ERASURES_PER_RUN)
+
+            logging.info(f"GDPR erasures processed this run: passengers={n_gp}, drivers={n_gd}, vehicles={n_gv}")
         else:
             logging.info("GDPR erasures processed this run: 0")
 
