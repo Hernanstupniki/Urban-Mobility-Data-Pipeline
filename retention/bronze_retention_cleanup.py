@@ -7,21 +7,20 @@ from delta.tables import DeltaTable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# -------------------------
-# Config (env-driven)
-# -------------------------
 ENV = os.getenv("ENV", "dev")
 BRONZE_BASE_PATH = os.getenv("BRONZE_BASE_PATH", f"data/{ENV}/bronze")
 
-# Por defecto: tablas con PII
-TABLES = os.getenv("TABLES", "passengers,drivers,ratings")
+# Tablas con PII / identificadores fuertes por defecto (GDPR scope)
+TABLES = os.getenv("TABLES", "passengers,drivers,vehicles,ratings,trips,payments")
+
+# Retención lógica (borrado de filas) por edad
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "30"))
 
-# VACUUM: Delta requiere horas
-VACUUM_RETAIN_HOURS = int(os.getenv("VACUUM_RETAIN_HOURS", str(RETENTION_DAYS * 24)))
+# Retención física (vacuum) por horas
+# Mejor práctica: 168h (7 días) por defecto. En DEV podés bajar, en PROD no.
+VACUUM_RETAIN_HOURS = int(os.getenv("VACUUM_RETAIN_HOURS", "168"))
 SKIP_VACUUM = os.getenv("SKIP_VACUUM", "false").lower() == "true"
 
-# Si querés loguear el conteo (más lento en tablas grandes)
 COUNT_BEFORE_DELETE = os.getenv("COUNT_BEFORE_DELETE", "false").lower() == "true"
 
 
@@ -38,7 +37,6 @@ def build_spark(app_name: str) -> SparkSession:
     # tuning dev/WSL
     spark.conf.set("spark.sql.shuffle.partitions", "4")
     spark.conf.set("spark.default.parallelism", "4")
-
     return spark
 
 
@@ -95,6 +93,7 @@ def main():
         logging.info(f"TABLES={tables}")
         logging.info(f"RETENTION_DAYS={RETENTION_DAYS}")
         logging.info(f"VACUUM_RETAIN_HOURS={VACUUM_RETAIN_HOURS} (skip={SKIP_VACUUM})")
+        logging.info(f"COUNT_BEFORE_DELETE={COUNT_BEFORE_DELETE}")
         logging.info("========================================")
 
         for t in tables:
