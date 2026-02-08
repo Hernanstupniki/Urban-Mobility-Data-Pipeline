@@ -153,6 +153,7 @@ def main():
             .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
             # Metadata
             .withColumn("source_system", trim(col("source_system")))
+            .withColumn("batch_id", col("batch_id"))
         )
 
         # null-likes -> NULL for make/model (optional free text)
@@ -230,7 +231,6 @@ def main():
                     concat_ws(
                         "||",
                         coalesce(col("driver_id").cast("string"), lit("")),
-                        coalesce(col("plate_number").cast("string"), lit("")),
                         coalesce(col("vehicle_type").cast("string"), lit("")),
                         coalesce(col("make").cast("string"), lit("")),
                         coalesce(col("model").cast("string"), lit("")),
