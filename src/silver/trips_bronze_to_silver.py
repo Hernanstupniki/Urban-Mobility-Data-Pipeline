@@ -156,7 +156,6 @@ def main():
                 when(col("actual_distance_km").cast("double") < 0, lit(None))
                 .otherwise(col("actual_distance_km").cast("double"))
             )
-            .withColumn("source_system", trim(col("source_system")))
             # Cancellation fields: cancel_reason, cancel_by, cancel_note
             .withColumn("cancel_reason", lower(trim(col("cancel_reason"))))
             .withColumn("cancel_by", lower(trim(col("cancel_by"))))
@@ -187,6 +186,8 @@ def main():
             .withColumn("created_at", col("created_at").cast("timestamp"))
             .withColumn("updated_at", col("updated_at").cast("timestamp"))
             .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
+            .withColumn("source_system", trim(col("source_system")))
+            .withColumn("batch_id", col("batch_id"))
         )
 
 
@@ -310,7 +311,6 @@ def main():
 
                         coalesce(col("cancel_reason").cast("string"), lit("")),
                         coalesce(col("cancel_by").cast("string"), lit("")),
-                        coalesce(col("cancel_note").cast("string"), lit("")),
 
                         coalesce(col("fare_amount").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))

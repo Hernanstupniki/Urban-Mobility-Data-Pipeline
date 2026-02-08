@@ -249,7 +249,6 @@ def main():
                         coalesce(col("status").cast("string"), lit("")),
                         coalesce(col("amount").cast("string"), lit("")),
                         coalesce(col("currency").cast("string"), lit("")),
-                        coalesce(col("provider_ref").cast("string"), lit("")),
                         coalesce(col("paid_at").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),

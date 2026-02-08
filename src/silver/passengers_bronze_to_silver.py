@@ -23,7 +23,7 @@ ETL_CONTROL_PATH = f"{CONTROL_BASE_PATH}/etl_control"
 
 # GDPR configs (simple + aligned to your architecture)
 GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
-GDPR_NULLIFY_CITY = os.getenv("GDPR_NULLIFY_CITY", "0") == "1"  # optional
+GDPR_NULLIFY_CITY = os.getenv("GDPR_NULLIFY_CITY", "1") == "1"  # optional
 
 
 # Delta control helpers

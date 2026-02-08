@@ -215,7 +215,6 @@ def main():
                         coalesce(col("passenger_id").cast("string"), lit("")),
                         coalesce(col("driver_id").cast("string"), lit("")),
                         coalesce(col("score").cast("string"), lit("")),
-                        coalesce(col("comment").cast("string"), lit("")),
                         coalesce(col("created_at").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),
