@@ -15,9 +15,7 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
-# ============================================================
 # Config
-# ============================================================
 JOB_NAME = "dim_date_build_gold_conformed"
 
 ENV = os.getenv("ENV", "dev")
@@ -44,9 +42,7 @@ FALLBACK_DAYS_BACK = int(os.getenv("FALLBACK_DAYS_BACK", "365"))
 FALLBACK_DAYS_FORWARD = int(os.getenv("FALLBACK_DAYS_FORWARD", "365"))
 
 
-# ============================================================
-# Delta control helpers (same pattern as your jobs)
-# ============================================================
+# Delta control helpers
 def ensure_etl_control_table(spark: SparkSession):
     if DeltaTable.isDeltaTable(spark, ETL_CONTROL_PATH):
         return
@@ -95,10 +91,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .execute()
     )
 
-
-# ============================================================
 # Helpers
-# ============================================================
 def _min_max_date_from_df(df, ts_col: str):
     # returns (min_date, max_date) as python dates (or None, None)
     row = (
@@ -143,9 +136,7 @@ def infer_date_range_from_silver(spark: SparkSession):
     return min(mins), max(maxs)
 
 
-# ============================================================
 # Main
-# ============================================================
 def main():
     spark = (
         SparkSession.builder
