@@ -143,6 +143,7 @@ def main():
             .withColumn("created_at", col("created_at").cast("timestamp"))
             .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
             .withColumn("source_system", trim(col("source_system")))
+            .withColumn("batch_id", col("batch_id"))
         )
 
         # Debug / confirmation
