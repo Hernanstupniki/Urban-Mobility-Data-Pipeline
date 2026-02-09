@@ -6,7 +6,7 @@ echo "Starting dim_date (Gold _conformed) build"
 # Defaults
 export ENV="${ENV:-dev}"
 
-# Optional overrides (uncomment if you want fixed range)
+# Optional overrides
 # export DATE_START="${DATE_START:-2025-01-01}"
 # export DATE_END="${DATE_END:-2026-12-31}"
 
