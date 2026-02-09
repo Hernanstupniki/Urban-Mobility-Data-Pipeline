@@ -10,17 +10,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 ENV = os.getenv("ENV", "dev")
 BRONZE_BASE_PATH = os.getenv("BRONZE_BASE_PATH", f"data/{ENV}/bronze")
 
-# Tablas con PII / identificadores fuertes por defecto (GDPR scope)
 TABLES = os.getenv("TABLES", "passengers,drivers,vehicles,ratings,trips,payments")
 
-# Retención lógica (borrado de filas) por edad
+# Retention logic
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "30"))
 
-# Retención física (vacuum) por horas
-# Mejor práctica: 168h (7 días) por defecto. En DEV podés bajar, en PROD no.
+# VACUUM
 VACUUM_RETAIN_HOURS = int(os.getenv("VACUUM_RETAIN_HOURS", "168"))
 SKIP_VACUUM = os.getenv("SKIP_VACUUM", "false").lower() == "true"
 
+# DEV ONLY: permitir VACUUM < 168 horas
+UNSAFE_VACUUM = os.getenv("UNSAFE_VACUUM", "0") in ("1", "true", "True")
+
+# Optional: log row counts before delete (slower)
 COUNT_BEFORE_DELETE = os.getenv("COUNT_BEFORE_DELETE", "false").lower() == "true"
 
 
@@ -34,9 +36,15 @@ def build_spark(app_name: str) -> SparkSession:
     )
     spark.sparkContext.setLogLevel("WARN")
 
-    # tuning dev/WSL
+    # dev/WSL tuning
     spark.conf.set("spark.sql.shuffle.partitions", "4")
     spark.conf.set("spark.default.parallelism", "4")
+
+    if UNSAFE_VACUUM:
+        # DEV ONLY: desactiva el safety check de Delta
+        spark.conf.set("spark.databricks.delta.retentionDurationCheck.enabled", "false")
+        logging.warning("UNSAFE_VACUUM=1 => Delta retentionDurationCheck DISABLED (DEV only)")
+
     return spark
 
 
@@ -50,12 +58,10 @@ def retention_delete_table(spark: SparkSession, table_path: str, retention_days:
 
     cutoff_date_expr = date_sub(current_date(), retention_days)
 
-    # Preferido: load_date (particionado)
     if "load_date" in cols:
         condition = col("load_date") < cutoff_date_expr
         condition_desc = f"load_date < date_sub(current_date(), {retention_days})"
 
-    # Alternativa: raw_loaded_at (timestamp)
     elif "raw_loaded_at" in cols:
         condition = expr(f"raw_loaded_at < (current_timestamp() - INTERVAL {retention_days} DAYS)")
         condition_desc = f"raw_loaded_at < current_timestamp() - INTERVAL {retention_days} DAYS"
@@ -76,7 +82,7 @@ def retention_delete_table(spark: SparkSession, table_path: str, retention_days:
     delta_tbl.delete(condition)
 
     if not SKIP_VACUUM:
-        logging.info(f"{table_path} | VACUUM RETAIN {VACUUM_RETAIN_HOURS} HOURS")
+        logging.info(f"{table_path} | VACUUM RETAIN {VACUUM_RETAIN_HOURS} HOURS (unsafe={UNSAFE_VACUUM})")
         delta_tbl.vacuum(VACUUM_RETAIN_HOURS)
 
 
@@ -93,6 +99,7 @@ def main():
         logging.info(f"TABLES={tables}")
         logging.info(f"RETENTION_DAYS={RETENTION_DAYS}")
         logging.info(f"VACUUM_RETAIN_HOURS={VACUUM_RETAIN_HOURS} (skip={SKIP_VACUUM})")
+        logging.info(f"UNSAFE_VACUUM={UNSAFE_VACUUM}")
         logging.info(f"COUNT_BEFORE_DELETE={COUNT_BEFORE_DELETE}")
         logging.info("========================================")
 
@@ -100,7 +107,7 @@ def main():
             path = os.path.join(BRONZE_BASE_PATH, t)
             retention_delete_table(spark, path, RETENTION_DAYS)
 
-        logging.info("Retention cleanup finished OK")
+        logging.info("Bronze retention cleanup finished OK")
 
     finally:
         spark.stop()
