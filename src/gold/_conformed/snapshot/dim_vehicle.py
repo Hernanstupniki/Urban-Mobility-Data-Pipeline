@@ -116,11 +116,16 @@ def main():
     update_set = {c: f"s.{c}" for c in cols if c != "vehicle_id"}
     insert_vals = {c: f"s.{c}" for c in cols}
 
+    # ✅ Mejora: si existe scd_hash, solo actualizar si cambió el hash
+    merge_condition = "s.raw_loaded_at > t.raw_loaded_at"
+    if "scd_hash" in cols:
+        merge_condition += " AND s.scd_hash <> t.scd_hash"
+
     (
         target.alias("t")
         .merge(dim_df.alias("s"), "t.vehicle_id = s.vehicle_id")
         .whenMatchedUpdate(
-            condition="s.raw_loaded_at > t.raw_loaded_at",
+            condition=merge_condition,
             set=update_set
         )
         .whenNotMatchedInsert(values=insert_vals)

@@ -34,6 +34,9 @@ def read_target_watermark(spark, path: str) -> datetime:
         return datetime(1970, 1, 1)
 
     df = spark.read.format("delta").load(path)
+    if df.rdd.isEmpty():
+        return datetime(1970, 1, 1)
+
     ts = df.select(spark_max(col("raw_loaded_at")).alias("wm")).first()["wm"]
     return ts or datetime(1970, 1, 1)
 
@@ -46,7 +49,7 @@ def ensure_scd_hash_if_missing(df, business_cols):
     if "scd_hash" in df.columns:
         return df
 
-    parts = [coalesce(col(c).cast("string"), lit("")) for c in business_cols]
+    parts = [coalesce(col(c).cast("string"), lit("")) for c in business_cols if c in df.columns]
     return df.withColumn("scd_hash", sha2(concat_ws("||", *parts), 256))
 
 
@@ -107,7 +110,10 @@ def main():
             spark.stop()
             return
 
-        # 4) Latest per driver_id inside incremental batch (igual que passenger)
+        # 4) Latest per driver_id inside incremental batch
+        if "driver_id" not in silver_df.columns:
+            raise ValueError("driver_id not found in silver/drivers schema")
+
         w = Window.partitionBy("driver_id").orderBy(col("raw_loaded_at").desc())
         latest_df = (
             silver_df
@@ -144,17 +150,19 @@ def main():
         target = DeltaTable.forPath(spark, GOLD_BASE_PATH)
 
         cols = dim_df.columns
-        if "driver_id" not in cols:
-            raise ValueError("driver_id not found in silver/drivers schema")
-
         update_set = {c: f"s.{c}" for c in cols if c != "driver_id"}
         insert_vals = {c: f"s.{c}" for c in cols}
+
+        # ✅ condición segura: si hay scd_hash, actualiza solo cuando cambia
+        merge_condition = "s.raw_loaded_at > t.raw_loaded_at"
+        if "scd_hash" in cols:
+            merge_condition += " AND s.scd_hash <> t.scd_hash"
 
         (
             target.alias("t")
             .merge(dim_df.alias("s"), "t.driver_id = s.driver_id")
             .whenMatchedUpdate(
-                condition="s.raw_loaded_at > t.raw_loaded_at AND s.scd_hash <> t.scd_hash",
+                condition=merge_condition,
                 set=update_set
             )
             .whenNotMatchedInsert(values=insert_vals)
