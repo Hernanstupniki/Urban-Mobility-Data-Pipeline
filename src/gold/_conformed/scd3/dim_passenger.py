@@ -16,6 +16,7 @@ ENV = os.getenv("ENV", "dev")
 
 SILVER_BASE_PATH = f"data/{ENV}/silver/passengers"
 GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/scd3/dim_passenger"
+GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
 
 
 # Helpers
@@ -92,6 +93,61 @@ def build_seed_scd3(silver_all, key_col: str):
 
     # ensure prev_* exists even if there is no rn=2 (left join gives nulls, ok)
     return seed
+
+
+def apply_gdpr_backfill_scd3(target: DeltaTable, gdpr_events_df):
+    if gdpr_events_df.rdd.isEmpty():
+        return
+
+    cols = set(target.toDF().columns)
+    set_map = {}
+
+    def set_with_prev(base_col: str, expr: str):
+        for col_name in (base_col, f"prev_{base_col}"):
+            if col_name in cols:
+                set_map[col_name] = expr
+
+    set_with_prev("full_name", f"'{GDPR_ANON_NAME}'")
+    set_with_prev("email", "CAST(NULL AS STRING)")
+    set_with_prev("phone", "CAST(NULL AS STRING)")
+    set_with_prev("city", "CAST(NULL AS STRING)")
+
+    if "is_deleted" in cols:
+        set_map["is_deleted"] = "true"
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+    if "deleted_at" in cols:
+        set_map["deleted_at"] = deleted_at_expr
+    if "prev_deleted_at" in cols:
+        set_map["prev_deleted_at"] = deleted_at_expr
+
+    if "missing_full_name" in cols:
+        set_map["missing_full_name"] = "false"
+    if "prev_missing_full_name" in cols:
+        set_map["prev_missing_full_name"] = "false"
+    if "missing_email" in cols:
+        set_map["missing_email"] = "true"
+    if "prev_missing_email" in cols:
+        set_map["prev_missing_email"] = "true"
+    if "missing_phone" in cols:
+        set_map["missing_phone"] = "true"
+    if "prev_missing_phone" in cols:
+        set_map["prev_missing_phone"] = "true"
+    if "invalid_email_format" in cols:
+        set_map["invalid_email_format"] = "false"
+    if "prev_invalid_email_format" in cols:
+        set_map["prev_invalid_email_format"] = "false"
+
+    if not set_map:
+        return
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.passenger_id = g.passenger_id")
+        .whenMatchedUpdate(set=set_map)
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR SCD3 backfill applied to dim_passenger.")
 
 
 def main():
@@ -206,6 +262,18 @@ def main():
             .whenNotMatchedInsert(values=set_all)
             .execute()
         )
+
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("passenger_id").alias("passenger_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["passenger_id"])
+            )
+            apply_gdpr_backfill_scd3(target, gdpr_events_df)
 
         print(f"[{JOB_NAME}] dim_passenger_scd3 MERGE completed at: {GOLD_BASE_PATH}")
         spark.stop()
