@@ -45,6 +45,21 @@ SILVER_RATINGS_PATH    = os.getenv("SILVER_RATINGS_PATH",    f"{SILVER_BASE}/rat
 SILVER_TRIPS_PATH      = os.getenv("SILVER_TRIPS_PATH",      f"{SILVER_BASE}/trips")
 SILVER_PAYMENTS_PATH   = os.getenv("SILVER_PAYMENTS_PATH",   f"{SILVER_BASE}/payments")
 
+# Gold layer (conformed)
+GOLD_BASE = os.getenv("GOLD_BASE", f"data/{ENV}/gold/_conformed")
+
+GOLD_HIST_PASSENGERS_PATH = os.getenv("GOLD_HIST_PASSENGERS_PATH", f"{GOLD_BASE}/hist/dim_passenger_hist")
+GOLD_HIST_DRIVERS_PATH    = os.getenv("GOLD_HIST_DRIVERS_PATH",    f"{GOLD_BASE}/hist/dim_driver_hist")
+GOLD_HIST_VEHICLES_PATH   = os.getenv("GOLD_HIST_VEHICLES_PATH",   f"{GOLD_BASE}/hist/dim_vehicle_hist")
+
+GOLD_SNAPSHOT_PASSENGERS_PATH = os.getenv("GOLD_SNAPSHOT_PASSENGERS_PATH", f"{GOLD_BASE}/snapshot/dim_passenger")
+GOLD_SNAPSHOT_DRIVERS_PATH    = os.getenv("GOLD_SNAPSHOT_DRIVERS_PATH",    f"{GOLD_BASE}/snapshot/dim_driver")
+GOLD_SNAPSHOT_VEHICLES_PATH   = os.getenv("GOLD_SNAPSHOT_VEHICLES_PATH",   f"{GOLD_BASE}/snapshot/dim_vehicle")
+
+GOLD_SCD3_PASSENGERS_PATH = os.getenv("GOLD_SCD3_PASSENGERS_PATH", f"{GOLD_BASE}/scd3/dim_passenger")
+GOLD_SCD3_DRIVERS_PATH    = os.getenv("GOLD_SCD3_DRIVERS_PATH",    f"{GOLD_BASE}/scd3/dim_driver")
+GOLD_SCD3_VEHICLES_PATH   = os.getenv("GOLD_SCD3_VEHICLES_PATH",   f"{GOLD_BASE}/scd3/dim_vehicle")
+
 # Control table for watermark
 CONTROL_BASE_PATH = os.getenv("CONTROL_BASE_PATH", f"data/{ENV}/_control")
 GDPR_CONTROL_PATH = os.getenv("GDPR_CONTROL_PATH", f"{CONTROL_BASE_PATH}/gdpr_control")
@@ -423,9 +438,15 @@ def anonymize_drivers_delta(spark: SparkSession, table_path: str, driver_ids_df)
         return "SKIP_NO_KEY", []
 
     set_map = {}
-    if "full_name" in cols:       set_map["full_name"] = f"'{ANON_NAME}'"
-    if "license_number" in cols:  set_map["license_number"] = "NULL"
-    if "status" in cols:          set_map["status"] = "'inactive'"
+    def set_for_variants(base_col: str, expr: str):
+        targets = [base_col, f"prev_{base_col}"]
+        for col_name in targets:
+            if col_name in cols:
+                set_map[col_name] = expr
+
+    set_for_variants("full_name", f"'{ANON_NAME}'")
+    set_for_variants("license_number", "CAST(NULL AS STRING)")
+    set_for_variants("status", "'inactive'")
 
     if "is_deleted" in cols: set_map["is_deleted"] = "true"
     if "deleted_at" in cols: set_map["deleted_at"] = "current_timestamp()"
@@ -451,9 +472,12 @@ def anonymize_vehicles_delta(spark: SparkSession, table_path: str, vehicle_ids_d
         return "SKIP_NO_KEY", []
 
     set_map = {}
-    if "plate_number" in cols:
-        # deterministic placeholder: ANON-PLATE-{vehicle_id} (use source alias s)
-        set_map["plate_number"] = f"concat('{ANON_PLATE_PREFIX}', cast(s.vehicle_id as string))"
+    def set_plate_variant(col_name: str):
+        if col_name in cols:
+            set_map[col_name] = f"concat('{ANON_PLATE_PREFIX}', cast(s.vehicle_id as string))"
+
+    set_plate_variant("plate_number")
+    set_plate_variant("prev_plate_number")
 
     if "is_deleted" in cols: set_map["is_deleted"] = "true"
     if "deleted_at" in cols: set_map["deleted_at"] = "current_timestamp()"
@@ -654,12 +678,28 @@ def scrub_payments_delta(
         return "SKIP_NO_COLUMN", ["provider_ref"]
     if "trip_id" not in pay_cols:
         logging.warning(f"SKIP (no trip_id column): {payments_path}")
-        return "SKIP_NO_KEY", ["provider_ref"]
+        return "SKIP_NO_TRIP_ID", ["provider_ref"]
 
-    trip_ids_df = derive_trip_ids_from_trips(spark, trips_path, passenger_ids_df, driver_ids_df, vehicle_ids_df)
-    if trip_ids_df is None or trip_ids_df.rdd.isEmpty():
-        logging.info(f"{payments_path} | no matched trips => no payments to scrub")
-        return "NO_MATCHED_TRIPS", ["provider_ref"]
+    trip_ids_df = derive_trip_ids_from_trips(
+        spark,
+        trips_path,
+        passenger_ids_df,
+        driver_ids_df,
+        vehicle_ids_df,
+    )
+
+    if trip_ids_df is None:
+        logging.warning(f"SKIP (could not derive trip ids): {trips_path}")
+        return "SKIP_NO_TRIPS", ["provider_ref"]
+
+    trip_ids_df = (
+        trip_ids_df
+        .filter(col("trip_id").isNotNull())
+        .distinct()
+    )
+    if trip_ids_df.rdd.isEmpty():
+        logging.info(f"{payments_path} | No trips matched GDPR subjects")
+        return "SKIP_NO_MATCHING_TRIPS", ["provider_ref"]
 
     set_map = {"provider_ref": "NULL"}
     cols_used = ["provider_ref"]
@@ -669,7 +709,11 @@ def scrub_payments_delta(
 
     logging.info(f"{payments_path} | GDPR scrub payments.provider_ref (via trips.trip_id)")
     merge_update_by_ids(
-        spark, payments_path, trip_ids_df, "trip_id", set_map,
+        spark,
+        payments_path,
+        trip_ids_df,
+        "trip_id",
+        set_map,
         match_condition="t.provider_ref IS NOT NULL"
     )
     return "APPLIED", cols_used
@@ -726,6 +770,15 @@ def main():
             st, cols_used = anonymize_passengers_delta(spark, SILVER_PASSENGERS_PATH, passenger_ids_df)
             audit_log_action(spark, passenger_subjects_df, "silver", "passengers", "anonymize", cols_used, st)
 
+            st, cols_used = anonymize_passengers_delta(spark, GOLD_HIST_PASSENGERS_PATH, passenger_ids_df)
+            audit_log_action(spark, passenger_subjects_df, "gold_hist", "dim_passenger_hist", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_passengers_delta(spark, GOLD_SNAPSHOT_PASSENGERS_PATH, passenger_ids_df)
+            audit_log_action(spark, passenger_subjects_df, "gold_snapshot", "dim_passenger_snapshot", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_passengers_delta(spark, GOLD_SCD3_PASSENGERS_PATH, passenger_ids_df)
+            audit_log_action(spark, passenger_subjects_df, "gold_scd3", "dim_passenger_scd3", "anonymize", cols_used, st)
+
         # DRIVERS
         if n_d > 0:
             st, cols_used = anonymize_drivers_delta(spark, BRONZE_DRIVERS_PATH, driver_ids_df)
@@ -734,6 +787,15 @@ def main():
             st, cols_used = anonymize_drivers_delta(spark, SILVER_DRIVERS_PATH, driver_ids_df)
             audit_log_action(spark, driver_subjects_df, "silver", "drivers", "anonymize", cols_used, st)
 
+            st, cols_used = anonymize_drivers_delta(spark, GOLD_HIST_DRIVERS_PATH, driver_ids_df)
+            audit_log_action(spark, driver_subjects_df, "gold_hist", "dim_driver_hist", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_drivers_delta(spark, GOLD_SNAPSHOT_DRIVERS_PATH, driver_ids_df)
+            audit_log_action(spark, driver_subjects_df, "gold_snapshot", "dim_driver_snapshot", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_drivers_delta(spark, GOLD_SCD3_DRIVERS_PATH, driver_ids_df)
+            audit_log_action(spark, driver_subjects_df, "gold_scd3", "dim_driver_scd3", "anonymize", cols_used, st)
+
         # VEHICLES
         if n_v > 0:
             st, cols_used = anonymize_vehicles_delta(spark, BRONZE_VEHICLES_PATH, vehicle_ids_df)
@@ -741,6 +803,15 @@ def main():
 
             st, cols_used = anonymize_vehicles_delta(spark, SILVER_VEHICLES_PATH, vehicle_ids_df)
             audit_log_action(spark, vehicle_subjects_df, "silver", "vehicles", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_vehicles_delta(spark, GOLD_HIST_VEHICLES_PATH, vehicle_ids_df)
+            audit_log_action(spark, vehicle_subjects_df, "gold_hist", "dim_vehicle_hist", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_vehicles_delta(spark, GOLD_SNAPSHOT_VEHICLES_PATH, vehicle_ids_df)
+            audit_log_action(spark, vehicle_subjects_df, "gold_snapshot", "dim_vehicle_snapshot", "anonymize", cols_used, st)
+
+            st, cols_used = anonymize_vehicles_delta(spark, GOLD_SCD3_VEHICLES_PATH, vehicle_ids_df)
+            audit_log_action(spark, vehicle_subjects_df, "gold_scd3", "dim_vehicle_scd3", "anonymize", cols_used, st)
 
         # RATINGS.comment (passenger + driver)
         if (n_p + n_d) > 0:
