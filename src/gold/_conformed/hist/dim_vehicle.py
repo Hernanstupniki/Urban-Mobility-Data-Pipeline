@@ -16,6 +16,7 @@ ENV = os.getenv("ENV", "dev")
 
 SILVER_BASE_PATH = f"data/{ENV}/silver/vehicles"
 GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/hist/dim_vehicle_hist"
+ANON_PLATE_PREFIX = os.getenv("ANON_PLATE_PREFIX", "ANON-PLATE-")
 
 
 # Helpers
@@ -65,6 +66,31 @@ def ensure_scd2_fields(df):
     if "is_current" not in df.columns:
         df = df.withColumn("is_current", lit(True))
     return df
+
+
+def apply_gdpr_backfill_to_gold_hist(target: DeltaTable, gdpr_events_df):
+    gdpr_count = gdpr_events_df.count()
+    print(f"[{JOB_NAME}] GDPR vehicles in this batch: {gdpr_count}")
+
+    if gdpr_count == 0:
+        return
+
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+    anon_expr = f"concat('{ANON_PLATE_PREFIX}', cast(g.vehicle_id as string))"
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.vehicle_id = g.vehicle_id")
+        .whenMatchedUpdate(set={
+            "plate_number": anon_expr,
+            "is_deleted": "true",
+            "deleted_at": deleted_at_expr,
+            "missing_plate_number": "false",
+        })
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR backfill applied to Gold vehicle hist.")
 
 
 def main():
@@ -261,6 +287,18 @@ def main():
             .whenNotMatchedInsert(values=insert_vals)
             .execute()
         )
+
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("vehicle_id").alias("vehicle_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["vehicle_id"])
+            )
+            apply_gdpr_backfill_to_gold_hist(target, gdpr_events_df)
 
         print(f"[{JOB_NAME}] dim_vehicle_hist SCD2 MERGE completed at: {GOLD_BASE_PATH}")
         spark.stop()
