@@ -18,6 +18,7 @@ ENV = os.getenv("ENV", "dev")
 
 SILVER_BASE_PATH = f"data/{ENV}/silver/drivers"
 GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/snapshot/dim_driver"
+GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
 
 
 # Helpers
@@ -39,6 +40,43 @@ def read_target_watermark(spark, path: str) -> datetime:
 
     ts = df.select(spark_max(col("raw_loaded_at")).alias("wm")).first()["wm"]
     return ts or datetime(1970, 1, 1)
+
+
+def apply_gdpr_backfill_snapshot(target: DeltaTable, gdpr_events_df):
+    if gdpr_events_df.rdd.isEmpty():
+        return
+
+    cols = set(target.toDF().columns)
+    set_map = {}
+
+    def set_if_exists(column: str, expr: str):
+        if column in cols:
+            set_map[column] = expr
+
+    set_if_exists("full_name", f"'{GDPR_ANON_NAME}'")
+    set_if_exists("license_number", "CAST(NULL AS STRING)")
+    set_if_exists("status", "'inactive'")
+    set_if_exists("is_deleted", "true")
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+    if "deleted_at" in cols:
+        set_map["deleted_at"] = deleted_at_expr
+    set_if_exists("updated_at", "current_timestamp()")
+
+    set_if_exists("missing_full_name", "false")
+    set_if_exists("missing_license_number", "true")
+    set_if_exists("invalid_status", "false")
+
+    if not set_map:
+        return
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.driver_id = g.driver_id")
+        .whenMatchedUpdate(set=set_map)
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR snapshot backfill applied to dim_driver.")
 
 
 def ensure_scd_hash_if_missing(df, business_cols):
@@ -168,6 +206,18 @@ def main():
             .whenNotMatchedInsert(values=insert_vals)
             .execute()
         )
+
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("driver_id").alias("driver_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["driver_id"])
+            )
+            apply_gdpr_backfill_snapshot(target, gdpr_events_df)
 
         print(f"[{JOB_NAME}] dim_driver_snapshot MERGE completed at: {GOLD_BASE_PATH}")
         spark.stop()
