@@ -16,6 +16,7 @@ ENV = os.getenv("ENV", "dev")
 
 SILVER_BASE_PATH = f"data/{ENV}/silver/vehicles"
 GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/scd3/dim_vehicle"
+ANON_PLATE_PREFIX = os.getenv("ANON_PLATE_PREFIX", "ANON-PLATE-")
 
 
 # Helpers
@@ -78,6 +79,50 @@ def build_seed_scd3(silver_all, key_col: str):
         .join(prev_pref.alias("p"), on=key_col, how="left")
         .withColumn("dwh_loaded_at", current_timestamp())
     )
+
+
+def apply_gdpr_backfill_scd3(target: DeltaTable, gdpr_events_df):
+    if gdpr_events_df.rdd.isEmpty():
+        return
+
+    cols = set(target.toDF().columns)
+    set_map = {}
+
+    def set_plate_variant(column: str):
+        if column in cols:
+            set_map[column] = f"concat('{ANON_PLATE_PREFIX}', cast(g.vehicle_id as string))"
+
+    set_plate_variant("plate_number")
+    set_plate_variant("prev_plate_number")
+
+    if "is_deleted" in cols:
+        set_map["is_deleted"] = "true"
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+    if "deleted_at" in cols:
+        set_map["deleted_at"] = deleted_at_expr
+    if "prev_deleted_at" in cols:
+        set_map["prev_deleted_at"] = deleted_at_expr
+    if "updated_at" in cols:
+        set_map["updated_at"] = "current_timestamp()"
+    if "prev_updated_at" in cols:
+        set_map["prev_updated_at"] = "current_timestamp()"
+
+    if "missing_plate_number" in cols:
+        set_map["missing_plate_number"] = "false"
+    if "prev_missing_plate_number" in cols:
+        set_map["prev_missing_plate_number"] = "false"
+
+    if not set_map:
+        return
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.vehicle_id = g.vehicle_id")
+        .whenMatchedUpdate(set=set_map)
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR SCD3 backfill applied to dim_vehicle.")
 
 
 def main():
@@ -187,6 +232,18 @@ def main():
             .whenNotMatchedInsert(values=set_all)
             .execute()
         )
+
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("vehicle_id").alias("vehicle_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["vehicle_id"])
+            )
+            apply_gdpr_backfill_scd3(target, gdpr_events_df)
 
         print(f"[{JOB_NAME}] dim_vehicle_scd3 MERGE completed at: {GOLD_BASE_PATH}")
         spark.stop()
