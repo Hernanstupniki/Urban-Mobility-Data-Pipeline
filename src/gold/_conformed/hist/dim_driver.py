@@ -10,12 +10,13 @@ from pyspark.sql.window import Window
 from delta.tables import DeltaTable
 
 # Config
-JOB_NAME = "dim_vehicle_hist_build_gold_conformed"
+JOB_NAME = "dim_driver_hist_build_gold_conformed"
 
 ENV = os.getenv("ENV", "dev")
 
-SILVER_BASE_PATH = f"data/{ENV}/silver/vehicles"
-GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/hist/dim_vehicle_hist"
+SILVER_BASE_PATH = f"data/{ENV}/silver/drivers"
+GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/hist/dim_driver_hist"
+GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
 
 
 # Helpers
@@ -25,7 +26,7 @@ def delta_exists(spark, path: str) -> bool:
 
 def read_target_watermark(spark) -> datetime:
     """
-    Watermark = max(raw_loaded_at) in target dim_vehicle_hist (SCD2)
+    Watermark = max(raw_loaded_at) in target dim_driver_hist (SCD2)
     If target doesn't exist -> 1970-01-01
     """
     if not delta_exists(spark, GOLD_BASE_PATH):
@@ -67,6 +68,34 @@ def ensure_scd2_fields(df):
     return df
 
 
+def apply_gdpr_backfill_to_gold_hist(target: DeltaTable, gdpr_events_df):
+    gdpr_count = gdpr_events_df.count()
+    print(f"[{JOB_NAME}] GDPR drivers in this batch: {gdpr_count}")
+
+    if gdpr_count == 0:
+        return
+
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.driver_id = g.driver_id")
+        .whenMatchedUpdate(set={
+            "full_name": f"'{GDPR_ANON_NAME}'",
+            "license_number": "CAST(NULL AS STRING)",
+            "status": "'inactive'",
+            "is_deleted": "true",
+            "deleted_at": deleted_at_expr,
+            "missing_license_number": "true",
+            "missing_full_name": "false",
+            "invalid_status": "false",
+        })
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR backfill applied to Gold driver hist.")
+
+
 def main():
     spark = (
         SparkSession.builder
@@ -101,31 +130,31 @@ def main():
     print(f"[{JOB_NAME}] target watermark (max raw_loaded_at): {wm}")
 
     try:
-        # 2) Read Silver (all rows)
+        # 2) Read Silver (SCD2 ya armado en Silver)
         silver_all = spark.read.format("delta").load(SILVER_BASE_PATH)
 
-        if "vehicle_id" not in silver_all.columns:
-            raise ValueError("vehicle_id not found in silver/vehicles schema")
+        if "driver_id" not in silver_all.columns:
+            raise ValueError("driver_id not found in silver/drivers schema")
 
         # --- FIRST RUN (seed full history) ---
         if not target_exists:
             seed_df = silver_all
 
             business_cols_guess = [c for c in [
-                "vehicle_id",
                 "driver_id",
-                "plate", "license_plate",
-                "brand", "make", "model",
-                "year", "color",
-                "vehicle_type", "type",
+                "full_name",
+                "license_number",
                 "status",
-                "is_deleted", "deleted_at",
+                "is_deleted",
+                "deleted_at",
                 "source_system"
             ] if c in seed_df.columns]
 
             seed_df = ensure_scd_hash_if_missing(seed_df, business_cols_guess)
             seed_df = ensure_scd2_fields(seed_df)
-            seed_df = seed_df.withColumn("dwh_loaded_at", current_timestamp())
+
+            if "dwh_loaded_at" not in seed_df.columns:
+                seed_df = seed_df.withColumn("dwh_loaded_at", current_timestamp())
 
             seed_count = seed_df.count()
             print(f"[{JOB_NAME}] silver seed count (all history): {seed_count}")
@@ -137,7 +166,7 @@ def main():
                 .save(GOLD_BASE_PATH)
             )
 
-            print(f"[{JOB_NAME}] dim_vehicle_hist created at: {GOLD_BASE_PATH}")
+            print(f"[{JOB_NAME}] dim_driver_hist created at: {GOLD_BASE_PATH}")
             spark.stop()
             return
 
@@ -157,8 +186,8 @@ def main():
             spark.stop()
             return
 
-        # 4) Latest per vehicle_id inside incremental batch
-        w = Window.partitionBy("vehicle_id").orderBy(col("raw_loaded_at").desc())
+        # 4) Latest per driver_id inside incremental batch
+        w = Window.partitionBy("driver_id").orderBy(col("raw_loaded_at").desc())
         latest_df = (
             silver_df
             .withColumn("rn", row_number().over(w))
@@ -168,19 +197,17 @@ def main():
 
         # 5) Ensure SCD2 + hash + audit
         business_cols_guess = [c for c in [
-            "vehicle_id",
             "driver_id",
-            "plate", "license_plate",
-            "brand", "make", "model",
-            "year", "color",
-            "vehicle_type", "type",
+            "full_name",
+            "license_number",
             "status",
-            "is_deleted", "deleted_at",
+            "is_deleted",
+            "deleted_at",
             "source_system"
         ] if c in latest_df.columns]
 
         dim_df = ensure_scd_hash_if_missing(latest_df, business_cols_guess)
-        dim_df = ensure_scd2_fields(dim_df)  # valid_from/raw_loaded_at, valid_to null, is_current true
+        dim_df = ensure_scd2_fields(dim_df)
         dim_df = dim_df.withColumn("dwh_loaded_at", current_timestamp())
 
         target = DeltaTable.forPath(spark, GOLD_BASE_PATH)
@@ -190,7 +217,7 @@ def main():
             target.alias("t")
             .merge(
                 dim_df.alias("s"),
-                "t.vehicle_id = s.vehicle_id AND t.is_current = true"
+                "t.driver_id = s.driver_id AND t.is_current = true"
             )
             .whenMatchedUpdate(
                 condition="s.raw_loaded_at > t.raw_loaded_at AND s.scd_hash <> t.scd_hash",
@@ -202,34 +229,31 @@ def main():
             .execute()
         )
 
-        # 7) SCD2 step 2: insert new version
+        # 7) SCD2 step 2: insert new version (MANUAL estilo tu Silver 7.2)
         insert_vals_full = {
-            # Keys / relations
-            "vehicle_id": "s.vehicle_id",
+            # Keys
             "driver_id": "s.driver_id",
 
-            # Vehicle attrs
-            "plate": "s.plate",
-            "license_plate": "s.license_plate",
-            "brand": "s.brand",
-            "make": "s.make",
-            "model": "s.model",
-            "year": "s.year",
-            "color": "s.color",
-            "vehicle_type": "s.vehicle_type",
-            "type": "s.type",
+            # Driver attrs
+            "full_name": "s.full_name",
+            "license_number": "s.license_number",
             "status": "s.status",
 
-            # Soft delete / OLTP audit (if exists)
+            # Soft delete / OLTP audit
             "is_deleted": "s.is_deleted",
             "deleted_at": "s.deleted_at",
             "created_at": "s.created_at",
             "updated_at": "s.updated_at",
 
-            # Ingestion metadata (if exists)
+            # Ingestion metadata
             "batch_id": "s.batch_id",
             "source_system": "s.source_system",
             "raw_loaded_at": "s.raw_loaded_at",
+
+            # enrichment flags
+            "missing_full_name": "s.missing_full_name",
+            "missing_license_number": "s.missing_license_number",
+            "invalid_status": "s.invalid_status",
 
             # SCD2
             "scd_hash": "s.scd_hash",
@@ -241,29 +265,42 @@ def main():
             "dwh_loaded_at": "s.dwh_loaded_at",
         }
 
-        # We only insert the columns that actually exist in dim_df (avoids exploding due to plate vs license_plate, etc.)
+        # Insert only existing columns (in case the schema changes)
         insert_vals = {}
+        dim_cols = set(dim_df.columns)
         for k, expr in insert_vals_full.items():
+            if k not in dim_cols:
+                continue
             if expr.startswith("s."):
                 src_col = expr[2:]
-                if src_col in dim_df.columns:
+                if src_col in dim_cols:
                     insert_vals[k] = expr
             else:
-                # constantes tipo CAST(NULL...) / true
-                if k in dim_df.columns:
-                    insert_vals[k] = expr
+                insert_vals[k] = expr
 
         (
             target.alias("t")
             .merge(
                 dim_df.alias("s"),
-                "t.vehicle_id = s.vehicle_id AND t.is_current = true"
+                "t.driver_id = s.driver_id AND t.is_current = true"
             )
             .whenNotMatchedInsert(values=insert_vals)
             .execute()
         )
 
-        print(f"[{JOB_NAME}] dim_vehicle_hist SCD2 MERGE completed at: {GOLD_BASE_PATH}")
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("driver_id").alias("driver_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["driver_id"])
+            )
+            apply_gdpr_backfill_to_gold_hist(target, gdpr_events_df)
+
+        print(f"[{JOB_NAME}] dim_driver_hist SCD2 MERGE completed at: {GOLD_BASE_PATH}")
         spark.stop()
 
     except Exception:
