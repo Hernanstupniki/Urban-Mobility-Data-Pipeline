@@ -16,6 +16,7 @@ ENV = os.getenv("ENV", "dev")
 
 SILVER_BASE_PATH = f"data/{ENV}/silver/passengers"
 GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/snapshot/dim_passenger"
+GDPR_ANON_NAME = os.getenv("GDPR_ANON_NAME", "ANONYMIZED")
 
 
 def read_target_watermark(spark) -> datetime:
@@ -29,6 +30,45 @@ def read_target_watermark(spark) -> datetime:
     df = spark.read.format("delta").load(GOLD_BASE_PATH)
     ts = df.select(spark_max(col("raw_loaded_at")).alias("wm")).first()["wm"]
     return ts or datetime(1970, 1, 1)
+
+
+def apply_gdpr_backfill_snapshot(target: DeltaTable, gdpr_events_df):
+    if gdpr_events_df.rdd.isEmpty():
+        return
+
+    cols = set(target.toDF().columns)
+    set_map = {}
+
+    def set_if_exists(column: str, expr: str):
+        if column in cols:
+            set_map[column] = expr
+
+    set_if_exists("full_name", f"'{GDPR_ANON_NAME}'")
+    set_if_exists("email", "CAST(NULL AS STRING)")
+    set_if_exists("phone", "CAST(NULL AS STRING)")
+    set_if_exists("city", "CAST(NULL AS STRING)")
+    set_if_exists("is_deleted", "true")
+    deleted_at_expr = "coalesce(g.deleted_at, t.deleted_at, current_timestamp())"
+    if "deleted_at" in cols:
+        set_map["deleted_at"] = deleted_at_expr
+    set_if_exists("updated_at", "current_timestamp()")
+
+    set_if_exists("missing_full_name", "false")
+    set_if_exists("missing_email", "true")
+    set_if_exists("missing_phone", "true")
+    set_if_exists("invalid_email_format", "false")
+
+    if not set_map:
+        return
+
+    (
+        target.alias("t")
+        .merge(gdpr_events_df.alias("g"), "t.passenger_id = g.passenger_id")
+        .whenMatchedUpdate(set=set_map)
+        .execute()
+    )
+
+    print(f"[{JOB_NAME}] GDPR snapshot backfill applied to dim_passenger.")
 
 
 def main():
@@ -47,93 +87,109 @@ def main():
     spark.conf.set("spark.default.parallelism", "4")
     spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
 
-    # Delta schema auto-merge (dev default)
-    AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
-    if AUTO_MERGE:
-        spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
-        print("[CONFIG] Delta schema auto-merge: ENABLED")
-    else:
-        print("[CONFIG] Delta schema auto-merge: DISABLED")
+    try:
+        # Delta schema auto-merge (dev default)
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        if AUTO_MERGE:
+            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
+            print("[CONFIG] Delta schema auto-merge: ENABLED")
+        else:
+            print("[CONFIG] Delta schema auto-merge: DISABLED")
 
-    if not DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH):
-        raise RuntimeError(f"[{JOB_NAME}] Silver table not found at: {SILVER_BASE_PATH}")
+        if not DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH):
+            raise RuntimeError(f"[{JOB_NAME}] Silver table not found at: {SILVER_BASE_PATH}")
 
-    target_exists = DeltaTable.isDeltaTable(spark, GOLD_BASE_PATH)
+        target_exists = DeltaTable.isDeltaTable(spark, GOLD_BASE_PATH)
 
-    # 1) Watermark from target
-    wm = read_target_watermark(spark)
-    print(f"[{JOB_NAME}] target watermark (max raw_loaded_at): {wm}")
+        # 1) Watermark from target
+        wm = read_target_watermark(spark)
+        print(f"[{JOB_NAME}] target watermark (max raw_loaded_at): {wm}")
 
-    # 2) Read Silver (current snapshot only)
-    silver_df = (
-        spark.read.format("delta").load(SILVER_BASE_PATH)
-        .filter(col("is_current") == lit(True))
-    )
+        # 2) Read Silver (current snapshot only)
+        silver_df = (
+            spark.read.format("delta").load(SILVER_BASE_PATH)
+            .filter(col("is_current") == lit(True))
+        )
 
-    # 3) Incremental filter (only if target exists)
-    if target_exists:
-        silver_df = silver_df.filter(col("raw_loaded_at") > lit(wm))
+        # 3) Incremental filter (only if target exists)
+        if target_exists:
+            silver_df = silver_df.filter(col("raw_loaded_at") > lit(wm))
 
-    inc_count = silver_df.count()
-    print(f"[{JOB_NAME}] silver incremental count: {inc_count}")
+        inc_count = silver_df.count()
+        print(f"[{JOB_NAME}] silver incremental count: {inc_count}")
 
-    if inc_count == 0:
-        print("No new silver records to process")
-        spark.stop()
-        return
+        if inc_count == 0:
+            print("No new silver records to process")
+            return
 
-    # 4) Latest per passenger_id inside incremental batch
-    if "passenger_id" not in silver_df.columns:
-        raise ValueError("passenger_id not found in silver/passengers schema")
+        # 4) Latest per passenger_id inside incremental batch
+        if "passenger_id" not in silver_df.columns:
+            raise ValueError("passenger_id not found in silver/passengers schema")
 
-    w = Window.partitionBy("passenger_id").orderBy(col("raw_loaded_at").desc())
-    latest_df = (
-        silver_df
-        .withColumn("rn", row_number().over(w))
-        .filter(col("rn") == 1)
-        .drop("rn")
-    )
+        w = Window.partitionBy("passenger_id").orderBy(col("raw_loaded_at").desc())
+        latest_df = (
+            silver_df
+            .withColumn("rn", row_number().over(w))
+            .filter(col("rn") == 1)
+            .drop("rn")
+        )
 
-    # 5) Add DWH audit
-    dim_df = latest_df.withColumn("dwh_loaded_at", current_timestamp())
+        # 5) Add DWH audit
+        dim_df = latest_df.withColumn("dwh_loaded_at", current_timestamp())
 
-    # 6) First run -> create
-    if not target_exists:
+        # 6) First run -> create
+        if not target_exists:
+            (
+                dim_df.write.format("delta")
+                .mode("overwrite")
+                .option("overwriteSchema", "true")
+                .save(GOLD_BASE_PATH)
+            )
+            print(f"[{JOB_NAME}] dim_passenger created at: {GOLD_BASE_PATH}")
+            return
+
+        # 7) Incremental MERGE (SCD1 snapshot)
+        target = DeltaTable.forPath(spark, GOLD_BASE_PATH)
+
+        cols = dim_df.columns
+        update_set = {c: f"s.{c}" for c in cols if c != "passenger_id"}
+        insert_vals = {c: f"s.{c}" for c in cols}
+
+        # ✅ Mejora: si existe scd_hash, solo actualizar si cambió el hash
+        merge_condition = "s.raw_loaded_at > t.raw_loaded_at"
+        if "scd_hash" in cols:
+            merge_condition += " AND s.scd_hash <> t.scd_hash"
+
         (
-            dim_df.write.format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .save(GOLD_BASE_PATH)
+            target.alias("t")
+            .merge(dim_df.alias("s"), "t.passenger_id = s.passenger_id")
+            .whenMatchedUpdate(
+                condition=merge_condition,
+                set=update_set
+            )
+            .whenNotMatchedInsert(values=insert_vals)
+            .execute()
         )
-        print(f"[{JOB_NAME}] dim_passenger created at: {GOLD_BASE_PATH}")
+
+        if "is_deleted" in dim_df.columns:
+            gdpr_events_df = (
+                dim_df
+                .filter(col("is_deleted") == lit(True))
+                .select(
+                    col("passenger_id").alias("passenger_id"),
+                    col("deleted_at").alias("deleted_at")
+                )
+                .dropDuplicates(["passenger_id"])
+            )
+            apply_gdpr_backfill_snapshot(target, gdpr_events_df)
+
+        print(f"[{JOB_NAME}] dim_passenger MERGE completed at: {GOLD_BASE_PATH}")
+
+    except Exception:
+        print(f"[{JOB_NAME}] FAILED snapshot build")
+        raise
+    finally:
         spark.stop()
-        return
-
-    # 7) Incremental MERGE (SCD1 snapshot)
-    target = DeltaTable.forPath(spark, GOLD_BASE_PATH)
-
-    cols = dim_df.columns
-    update_set = {c: f"s.{c}" for c in cols if c != "passenger_id"}
-    insert_vals = {c: f"s.{c}" for c in cols}
-
-    # ✅ Mejora: si existe scd_hash, solo actualizar si cambió el hash
-    merge_condition = "s.raw_loaded_at > t.raw_loaded_at"
-    if "scd_hash" in cols:
-        merge_condition += " AND s.scd_hash <> t.scd_hash"
-
-    (
-        target.alias("t")
-        .merge(dim_df.alias("s"), "t.passenger_id = s.passenger_id")
-        .whenMatchedUpdate(
-            condition=merge_condition,
-            set=update_set
-        )
-        .whenNotMatchedInsert(values=insert_vals)
-        .execute()
-    )
-
-    print(f"[{JOB_NAME}] dim_passenger MERGE completed at: {GOLD_BASE_PATH}")
-    spark.stop()
 
 
 if __name__ == "__main__":
