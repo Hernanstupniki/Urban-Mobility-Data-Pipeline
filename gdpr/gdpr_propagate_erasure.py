@@ -723,7 +723,6 @@ def scrub_payments_delta(
 # Main
 # ============================================================
 def main():
-    global spark
     spark = build_spark(f"{JOB_NAME}_{ENV}")
 
     try:
