@@ -16,7 +16,11 @@ ENV = os.getenv("ENV", "dev")
 SILVER_BASE_PATH = os.getenv("SILVER_BASE_PATH", f"data/{ENV}/silver")
 
 # Default: tables that typically have SCD2 history
-TABLES = os.getenv("TABLES", "passengers,drivers,ratings")
+# Override via TABLES env var (comma separated) when a new Silver domain appears.
+TABLES = os.getenv(
+    "TABLES",
+    "passengers,drivers,vehicles,trips,payments,ratings,zones"
+)
 
 # SCD2 history retention (in days) - default: 1 year
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "365"))
