@@ -59,7 +59,7 @@ def read_last_loaded_ts(spark) -> datetime:
     return ts or datetime(1970, 1, 1)
 
 
-def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
+def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, status: str):
     """
     Upsert watermark in Delta.
     - If last_loaded_ts is none(FAIL), DO NOT step the previous watermark.
@@ -95,7 +95,6 @@ def upsert_etl_control(job_name: str, last_loaded_ts, status: str):
 
 # Main
 def main():
-    global spark
     spark = (
         SparkSession.builder
         .appName(JOB_NAME)
@@ -332,7 +331,7 @@ def main():
                 .save(SILVER_BASE_PATH)
             )
             max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
-            upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
+            upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
             print("Silver trips table created + etl_control (delta) updated")
             spark.stop()
             return
@@ -434,7 +433,7 @@ def main():
 
         # 7) Update watermark at the end
         max_ts = scd_ready_df.select(spark_max("raw_loaded_at")).first()[0]
-        upsert_etl_control(JOB_NAME, max_ts, "SUCCESS")
+        upsert_etl_control(spark, JOB_NAME, max_ts, "SUCCESS")
 
         print("Silver trips MERGE completed + etl_control (delta) updated")
         spark.stop()
@@ -442,7 +441,7 @@ def main():
     except Exception as e:
         # marcar FAIL sin mover watermark
         try:
-            upsert_etl_control(JOB_NAME, None, f"FAIL: {type(e).__name__}")
+            upsert_etl_control(spark, JOB_NAME, None, f"FAIL: {type(e).__name__}")
         except Exception:
             pass
         spark.stop()
