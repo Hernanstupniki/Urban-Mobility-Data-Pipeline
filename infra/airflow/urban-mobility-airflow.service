@@ -1,0 +1,21 @@
+[Unit]
+Description=Urban Mobility Airflow and Spark cluster
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=hernan
+Group=docker
+Environment=HOME=/home/hernan
+WorkingDirectory=/home/hernan/Urban-Mobility-Data-Pipeline/infra/airflow
+ExecStart=/usr/bin/docker compose --profile spark-cluster up -d
+ExecReload=/usr/bin/docker compose --profile spark-cluster up -d
+ExecStop=/usr/bin/docker compose --profile spark-cluster stop
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
