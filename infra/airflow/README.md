@@ -195,6 +195,10 @@ Interfaces disponibles mientras el stack está activo:
 - Spark Worker 2: `http://localhost:8083`.
 - Spark Driver: `http://localhost:4040` mientras se ejecuta un job.
 
+Los enlaces de Worker mostrados por la UI del Spark Master anuncian
+`localhost` y el puerto público correspondiente, por lo que también son
+accesibles directamente desde el navegador de Windows.
+
 ### Modo distribuido normal
 
 ```bash

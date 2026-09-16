@@ -197,16 +197,18 @@ services:
         - |
           exec "$${SPARK_HOME}/bin/spark-class" \
             org.apache.spark.deploy.worker.Worker \
-            --webui-port 8081 \
+            --webui-port "$${SPARK_WORKER_UI_PORT}" \
             --cores "$${SPARK_WORKER_CORES}" \
             --memory "$${SPARK_WORKER_MEMORY}" \
             spark://spark-master:7077
-      environment:
+      environment: &spark-worker-env
         SPARK_HOME: /home/airflow/.local/lib/python3.12/site-packages/pyspark
         JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        SPARK_PUBLIC_DNS: ${SPARK_PUBLIC_DNS:-localhost}
         SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-1}
         SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-768m}
         SPARK_DAEMON_MEMORY: ${SPARK_WORKER_DAEMON_MEMORY:-384m}
+        SPARK_WORKER_UI_PORT: ${SPARK_WORKER_1_UI_PORT:-8082}
       volumes:
         - ../../:/opt/project
       depends_on:
@@ -216,12 +218,15 @@ services:
       mem_limit: ${SPARK_WORKER_MEMORY_LIMIT:-1280m}
       restart: always
     ports:
-      - "${SPARK_WORKER_1_UI_PORT:-8082}:8081"
+      - "${SPARK_WORKER_1_UI_PORT:-8082}:${SPARK_WORKER_1_UI_PORT:-8082}"
 
   spark-worker-2:
     <<: *spark-worker
+    environment:
+      <<: *spark-worker-env
+      SPARK_WORKER_UI_PORT: ${SPARK_WORKER_2_UI_PORT:-8083}
     ports:
-      - "${SPARK_WORKER_2_UI_PORT:-8083}:8081"
+      - "${SPARK_WORKER_2_UI_PORT:-8083}:${SPARK_WORKER_2_UI_PORT:-8083}"
 
 volumes:
   postgres-db-volume:
