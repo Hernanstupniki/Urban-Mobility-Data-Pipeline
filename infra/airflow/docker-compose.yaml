@@ -1,0 +1,227 @@
+x-airflow-common:
+  &airflow-common
+  build: .
+  image: mobility-airflow-spark:2.10.5
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-False}
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.session
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: ${AIRFLOW_WORKER_CONCURRENCY:-2}
+    _PIP_ADDITIONAL_REQUIREMENTS: ""
+    ENV: ${ENV:-dev}
+    OLTP_DB_HOST: ${DB_HOST:-host.docker.internal}
+    DB_NAME: ${DB_NAME:-mobility_oltp}
+    DB_USER: ${DB_USER:-postgres}
+    DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    AIRFLOW_DAG_MAX_ACTIVE_RUNS: ${AIRFLOW_DAG_MAX_ACTIVE_RUNS:-1}
+    AIRFLOW_SPARK_POOL: ${AIRFLOW_SPARK_POOL:-spark_pool}
+    AIRFLOW_SPARK_POOL_SLOTS: ${AIRFLOW_SPARK_POOL_SLOTS:-1}
+    SPARK_MASTER: ${SPARK_MASTER:-spark://spark-master:7077}
+    SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+    SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY:-768m}
+    SPARK_EXECUTOR_CORES: ${SPARK_EXECUTOR_CORES:-1}
+    SPARK_DRIVER_HOST: ${SPARK_DRIVER_HOST:-airflow-worker}
+    SPARK_DRIVER_BIND_ADDRESS: ${SPARK_DRIVER_BIND_ADDRESS:-0.0.0.0}
+    SPARK_DRIVER_UI_PORT: ${SPARK_DRIVER_UI_PORT:-4040}
+    SPARK_IVY_DIR: /home/airflow/.ivy2
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+    - ../../:/opt/project
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  redis:
+    image: redis:7.2-bookworm
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    user: "0:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
+        airflow db migrate
+        airflow users list | grep -q 'admin' || airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+        airflow pools set "$${AIRFLOW_SPARK_POOL}" \
+          "$${AIRFLOW_SPARK_POOL_SLOTS}" \
+          "Spark execution pool"
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d celery@$${HOSTNAME} || celery --app airflow.executors.celery_executor.app inspect ping -d celery@$${HOSTNAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    ports:
+      - "${SPARK_DRIVER_UI_PORT:-4040}:4040"
+    cpus: ${AIRFLOW_WORKER_CPU_LIMIT:-2.0}
+    mem_limit: ${AIRFLOW_WORKER_MEMORY_LIMIT:-3g}
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  spark-master:
+    profiles: ["spark-cluster"]
+    build: .
+    image: mobility-airflow-spark:2.10.5
+    entrypoint: ["/usr/bin/dumb-init", "--", "/bin/bash", "-c"]
+    command:
+      - |
+        exec "$${SPARK_HOME}/bin/spark-class" \
+          org.apache.spark.deploy.master.Master \
+          --host spark-master \
+          --port 7077 \
+          --webui-port 8080
+    environment:
+      SPARK_HOME: /home/airflow/.local/lib/python3.12/site-packages/pyspark
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      SPARK_DAEMON_MEMORY: ${SPARK_MASTER_DAEMON_MEMORY:-384m}
+    ports:
+      - "${SPARK_MASTER_UI_PORT:-8081}:8080"
+    expose:
+      - 7077
+    cpus: ${SPARK_MASTER_CPU_LIMIT:-0.5}
+    mem_limit: ${SPARK_MASTER_MEMORY_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: always
+
+  spark-worker-1:
+    <<: &spark-worker
+      profiles: ["spark-cluster"]
+      build: .
+      image: mobility-airflow-spark:2.10.5
+      entrypoint: ["/usr/bin/dumb-init", "--", "/bin/bash", "-c"]
+      command:
+        - |
+          exec "$${SPARK_HOME}/bin/spark-class" \
+            org.apache.spark.deploy.worker.Worker \
+            --webui-port 8081 \
+            --cores "$${SPARK_WORKER_CORES}" \
+            --memory "$${SPARK_WORKER_MEMORY}" \
+            spark://spark-master:7077
+      environment:
+        SPARK_HOME: /home/airflow/.local/lib/python3.12/site-packages/pyspark
+        JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-1}
+        SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-768m}
+        SPARK_DAEMON_MEMORY: ${SPARK_WORKER_DAEMON_MEMORY:-384m}
+      volumes:
+        - ../../:/opt/project
+      depends_on:
+        spark-master:
+          condition: service_healthy
+      cpus: ${SPARK_WORKER_CPU_LIMIT:-1.0}
+      mem_limit: ${SPARK_WORKER_MEMORY_LIMIT:-1280m}
+      restart: always
+    ports:
+      - "${SPARK_WORKER_1_UI_PORT:-8082}:8081"
+
+  spark-worker-2:
+    <<: *spark-worker
+    ports:
+      - "${SPARK_WORKER_2_UI_PORT:-8083}:8081"
+
+volumes:
+  postgres-db-volume:
