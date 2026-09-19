@@ -11,4 +11,4 @@ if [[ ! -f "$RUN_DIR/_common.sh" ]]; then
   exit 1
 fi
 source "$RUN_DIR/_common.sh"
-run_spark_job "retention/silver_retention_cleanup.py" "$@"
+run_spark_job "retention/gold_vacuum_only.py" "$@"

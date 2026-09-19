@@ -1,24 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-echo "========================================"
-echo "Starting Bronze Retention Cleanup (30d)"
-echo "========================================"
-
-export ENV="${ENV:-dev}"
-export RETENTION_DAYS="${RETENTION_DAYS:-30}"
-
-export BRONZE_BASE_PATH="${BRONZE_BASE_PATH:-data/${ENV}/bronze}"
-
-# 30 días = 720 horas (DEFAULT)
-export VACUUM_RETAIN_HOURS="${VACUUM_RETAIN_HOURS:-720}"
-
-spark-submit \
-  --packages io.delta:delta-spark_2.12:3.1.0 \
-  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
-  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
-  retention/bronze_retention_cleanup.py
-
-echo "========================================"
-echo "Bronze Retention Cleanup finished OK"
-echo "========================================"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="$SCRIPT_DIR"
+while [[ "$RUN_DIR" != "/" && ! -f "$RUN_DIR/_common.sh" ]]; do
+  RUN_DIR="$(dirname "$RUN_DIR")"
+done
+if [[ ! -f "$RUN_DIR/_common.sh" ]]; then
+  echo "Unable to locate scripts/run/_common.sh from $SCRIPT_DIR" >&2
+  exit 1
+fi
+source "$RUN_DIR/_common.sh"
+run_spark_job "retention/bronze_retention_cleanup.py" "$@"
