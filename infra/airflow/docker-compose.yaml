@@ -1,6 +1,9 @@
 x-airflow-common:
   &airflow-common
-  build: .
+  build:
+    context: .
+    args:
+      RUNTIME_UID: ${AIRFLOW_UID:-50000}
   image: mobility-airflow-spark:2.10.5
   environment:
     &airflow-common-env
@@ -15,10 +18,13 @@ x-airflow-common:
     AIRFLOW__CELERY__WORKER_CONCURRENCY: ${AIRFLOW_WORKER_CONCURRENCY:-2}
     _PIP_ADDITIONAL_REQUIREMENTS: ""
     ENV: ${ENV:-dev}
+    PROJECT_DIR: /opt/project
     OLTP_DB_HOST: ${DB_HOST:-host.docker.internal}
-    DB_NAME: ${DB_NAME:-mobility_oltp}
-    DB_USER: ${DB_USER:-postgres}
-    DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    OLTP_DB_PORT: ${DB_PORT:-5432}
+    OLTP_DB_NAME: ${DB_NAME:-mobility_oltp}
+    OLTP_DB_USER: ${DB_USER:-postgres}
+    OLTP_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    GDPR_HASH_KEY: ${GDPR_HASH_KEY:?GDPR_HASH_KEY is required}
     AIRFLOW_DAG_MAX_ACTIVE_RUNS: ${AIRFLOW_DAG_MAX_ACTIVE_RUNS:-1}
     AIRFLOW_SPARK_POOL: ${AIRFLOW_SPARK_POOL:-spark_pool}
     AIRFLOW_SPARK_POOL_SLOTS: ${AIRFLOW_SPARK_POOL_SLOTS:-1}
@@ -36,6 +42,8 @@ x-airflow-common:
     - ./plugins:/opt/airflow/plugins
     - ./config:/opt/airflow/config
     - ../../:/opt/project
+  extra_hosts:
+    - "host.docker.internal:${DOCKER_HOST_GATEWAY:-172.18.0.1}"
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -157,9 +165,25 @@ services:
         condition: service_completed_successfully
     restart: always
 
+  oltp-db-proxy:
+    image: mobility-airflow-spark:2.10.5
+    network_mode: host
+    entrypoint: ["python3", "/opt/project/infra/airflow/postgres_bridge_proxy.py"]
+    environment:
+      OLTP_PROXY_LISTEN_HOST: ${OLTP_PROXY_LISTEN_HOST:-172.18.0.1}
+      OLTP_PROXY_LISTEN_PORT: ${OLTP_PROXY_LISTEN_PORT:-5432}
+      OLTP_PROXY_TARGET_HOST: ${OLTP_PROXY_TARGET_HOST:-127.0.0.1}
+      OLTP_PROXY_TARGET_PORT: ${OLTP_PROXY_TARGET_PORT:-5432}
+    volumes:
+      - ../../:/opt/project:ro
+    restart: always
+
   spark-master:
     profiles: ["spark-cluster"]
-    build: .
+    build:
+      context: .
+      args:
+        RUNTIME_UID: ${AIRFLOW_UID:-50000}
     image: mobility-airflow-spark:2.10.5
     entrypoint: ["/usr/bin/dumb-init", "--", "/bin/bash", "-c"]
     command:
@@ -190,7 +214,10 @@ services:
   spark-worker-1:
     <<: &spark-worker
       profiles: ["spark-cluster"]
-      build: .
+      build:
+        context: .
+        args:
+          RUNTIME_UID: ${AIRFLOW_UID:-50000}
       image: mobility-airflow-spark:2.10.5
       entrypoint: ["/usr/bin/dumb-init", "--", "/bin/bash", "-c"]
       command:
@@ -198,19 +225,25 @@ services:
           exec "$${SPARK_HOME}/bin/spark-class" \
             org.apache.spark.deploy.worker.Worker \
             --webui-port "$${SPARK_WORKER_UI_PORT}" \
+            --work-dir "$${SPARK_WORKER_DIR}" \
             --cores "$${SPARK_WORKER_CORES}" \
             --memory "$${SPARK_WORKER_MEMORY}" \
             spark://spark-master:7077
       environment: &spark-worker-env
         SPARK_HOME: /home/airflow/.local/lib/python3.12/site-packages/pyspark
         JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        SPARK_USER: airflow
         SPARK_PUBLIC_DNS: ${SPARK_PUBLIC_DNS:-localhost}
         SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-1}
         SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-768m}
         SPARK_DAEMON_MEMORY: ${SPARK_WORKER_DAEMON_MEMORY:-384m}
+        SPARK_WORKER_DIR: /tmp/spark-work
         SPARK_WORKER_UI_PORT: ${SPARK_WORKER_1_UI_PORT:-8082}
       volumes:
         - ../../:/opt/project
+      extra_hosts:
+        - "host.docker.internal:${DOCKER_HOST_GATEWAY:-172.18.0.1}"
+      user: "${AIRFLOW_UID:-50000}:0"
       depends_on:
         spark-master:
           condition: service_healthy

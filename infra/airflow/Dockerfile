@@ -53,3 +53,14 @@ spark.stop()" \
     && find "${SPARK_IVY_DIR}/jars" \
         -name 'io.delta_delta-storage-3.1.0.jar' -print -quit | grep -q . \
     && chmod -R g=u "${SPARK_IVY_DIR}"
+
+USER root
+
+ARG RUNTIME_UID=50000
+
+# Spark executors run with the host UID so shared Delta files remain writable.
+# Register that UID for Hadoop/JVM user lookup when it differs from `airflow`.
+RUN getent passwd "${RUNTIME_UID}" >/dev/null \
+    || echo "runtime:x:${RUNTIME_UID}:0:Runtime User:/home/airflow:/bin/bash" >> /etc/passwd
+
+USER airflow
