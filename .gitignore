@@ -2,5 +2,14 @@
 /data
 /metastore_db
 /derby.log
+infra/airflow/logs/
 src/bronze/test_bronze.py
 src/silver/test_silver.py
+tmp/check_scd2.py
+.env
+**/.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
