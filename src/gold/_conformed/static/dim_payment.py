@@ -15,6 +15,8 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
+from src.common.spark import build_spark
+
 # Config
 JOB_NAME = "dim_payment_method_static_build_gold_conformed"
 
@@ -27,25 +29,11 @@ NULL_LIKES = ["null", "n/a", "none", "-", ""]
 
 
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     # Delta schema auto-merge (dev default)
-    AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+    AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
     if AUTO_MERGE:
-        spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
         print("[CONFIG] Delta schema auto-merge: ENABLED")
     else:
         print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -64,9 +52,7 @@ def main():
         print(f"[{JOB_NAME}] silver current rows (is_current=true): {silver_count}")
 
         if silver_count == 0:
-            print("No silver rows to process")
-            spark.stop()
-            return
+            raise RuntimeError("No current payments found in required Silver source")
 
         # 2) Normalize method + keep raw_loaded_at
         base = (
@@ -95,9 +81,7 @@ def main():
         print(f"[{JOB_NAME}] distinct payment methods (normalized): {distinct_methods}")
 
         if distinct_methods == 0:
-            print("No valid payment methods after normalization")
-            spark.stop()
-            return
+            raise RuntimeError("No valid payment methods found after normalization")
 
         # 4) Deterministic key (0 reserved for UNKNOWN) -> 1..2147483646
         dim = (

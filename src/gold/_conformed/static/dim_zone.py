@@ -8,6 +8,8 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
 
+from src.common.spark import build_spark
+
 # Config
 JOB_NAME = "dim_zone_static_build_gold_conformed"
 
@@ -17,33 +19,18 @@ GOLD_BASE_PATH = f"data/{ENV}/gold/_conformed/static/dim_zone"
 
 
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning (igual a tus scripts)
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     # Delta schema auto-merge (dev default)
-    AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+    AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
     if AUTO_MERGE:
-        spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
         print("[CONFIG] Delta schema auto-merge: ENABLED")
     else:
         print("[CONFIG] Delta schema auto-merge: DISABLED")
 
     try:
         if not DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH):
-            print(f"[{JOB_NAME}] Silver zones table not found at: {SILVER_BASE_PATH}")
-            spark.stop()
-            return
+            raise RuntimeError(f"[{JOB_NAME}] Required Silver zones table not found at: {SILVER_BASE_PATH}")
 
         # 1) Read Silver (FULL REBUILD ALWAYS)
         silver_df = spark.read.format("delta").load(SILVER_BASE_PATH)
@@ -74,9 +61,7 @@ def main():
         print(f"[{JOB_NAME}] current silver rows (is_current=true): {count_current}")
 
         if count_current == 0:
-            print("No current zones found in Silver (nothing to rebuild)")
-            spark.stop()
-            return
+            raise RuntimeError("No current zones found in required Silver source")
 
         # 4) Conformed dimension (clean + consistent fields)
         # (si *_norm existe en Silver, lo mantenemos; si no, lo regeneramos)
@@ -117,6 +102,18 @@ def main():
         flag_cols = [c for c in ["zone_name_is_null", "city_is_null", "region_is_null", "has_missing_fields"] if c in dim_df.columns]
 
         dim_df = dim_df.select(*[c for c in base_cols if c in dim_df.columns], *flag_cols)
+
+        unknown = spark.range(1).select(*[
+            (
+                lit(0) if field.name == "zone_id" else
+                current_timestamp() if field.name == "dwh_loaded_at" else
+                lit(False) if field.dataType.typeName() == "boolean" else
+                lit("UNKNOWN") if field.dataType.typeName() == "string" and field.name in {"zone_name", "zone_name_norm"} else
+                lit(None)
+            ).cast(field.dataType).alias(field.name)
+            for field in dim_df.schema.fields
+        ])
+        dim_df = unknown.unionByName(dim_df)
 
         out_count = dim_df.count()
         print(f"[{JOB_NAME}] output rows: {out_count}")

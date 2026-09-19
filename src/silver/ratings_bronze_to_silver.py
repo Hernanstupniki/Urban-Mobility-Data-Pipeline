@@ -5,10 +5,19 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit, min as spark_min,
     max as spark_max, to_date, current_timestamp, coalesce,
-    trim, lower, sha2, concat_ws
+    trim, lower, regexp_replace, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
+
+from src.common.data_quality import (
+    NULL_LIKE_VALUES,
+    PII_ANY_PATTERN,
+    PII_CONTACT_SUFFIX_PATTERN,
+    PII_EMAIL_PATTERN,
+    PII_PHONE_PATTERN,
+)
+from src.common.spark import build_spark
 
 # Config
 JOB_NAME = "ratings_bronze_to_silver"
@@ -74,7 +83,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -82,7 +94,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -97,20 +109,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -131,8 +130,6 @@ def main():
                 .filter(col("raw_loaded_at") > lit(last_ts))
             )
 
-        NULL_LIKES = ["null", "n/a", "none", "-", ""]
-
         bronze_df = (
             bronze_reader
             # Ids
@@ -152,9 +149,17 @@ def main():
             # Comment: trim + null-likes -> NULL
             .withColumn("comment", trim(col("comment")))
             .withColumn(
+                "comment_contains_potential_pii",
+                coalesce(col("comment").rlike(PII_ANY_PATTERN), lit(False)),
+            )
+            .withColumn("comment", regexp_replace(col("comment"), PII_CONTACT_SUFFIX_PATTERN, ""))
+            .withColumn("comment", regexp_replace(col("comment"), PII_EMAIL_PATTERN, "[REDACTED]"))
+            .withColumn("comment", regexp_replace(col("comment"), PII_PHONE_PATTERN, "[REDACTED]"))
+            .withColumn("comment", trim(col("comment")))
+            .withColumn(
                 "comment",
                 when(col("comment").isNull(), lit(None))
-                .when(lower(col("comment")).isin(NULL_LIKES), lit(None))
+                .when(lower(col("comment")).isin(*NULL_LIKE_VALUES), lit(None))
                 .otherwise(col("comment"))
             )
 
@@ -200,6 +205,7 @@ def main():
             latest_ratings_df
             .withColumn("score_invalid", col("score").isNull())
             .withColumn("comment_missing", col("comment").isNull())
+            .fillna(False, subset=["score_invalid", "comment_missing", "comment_contains_potential_pii"])
         )
 
         # SCD hash (business columns only)
@@ -214,6 +220,8 @@ def main():
                         coalesce(col("passenger_id").cast("string"), lit("")),
                         coalesce(col("driver_id").cast("string"), lit("")),
                         coalesce(col("score").cast("string"), lit("")),
+                        coalesce(col("comment").cast("string"), lit("")),
+                        coalesce(col("comment_contains_potential_pii").cast("string"), lit("")),
                         coalesce(col("created_at").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),
@@ -240,9 +248,8 @@ def main():
             return
 
         # 6) Merge incremental (SCD2)
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -295,6 +302,7 @@ def main():
                 # Data quality flags
                 "score_invalid": "s.score_invalid",
                 "comment_missing": "s.comment_missing",
+                "comment_contains_potential_pii": "s.comment_contains_potential_pii",
 
                 # SCD2 fields
                 "scd_hash": "s.scd_hash",

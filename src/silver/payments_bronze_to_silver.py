@@ -5,10 +5,16 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit, min as spark_min,
     max as spark_max, to_date, current_timestamp, coalesce,
-    trim, lower, upper, length, sha2, concat_ws
+    trim, lower, upper, length, least, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
+
+from src.common.data_quality import (
+    NULL_LIKE_VALUES,
+    PII_ANY_PATTERN,
+)
+from src.common.spark import build_spark
 
 # Config
 JOB_NAME = "payments_bronze_to_silver"
@@ -74,7 +80,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -82,7 +91,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -97,20 +106,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -131,8 +127,6 @@ def main():
                 .filter(col("raw_loaded_at") > lit(last_ts))
             )
 
-        NULL_LIKES = ["null", "n/a", "none", "-", ""]
-
         bronze_df = (
             bronze_reader
             # Ids
@@ -151,7 +145,16 @@ def main():
                 .when(col("amount") < lit(0).cast("decimal(12,2)"), lit(None).cast("decimal(12,2)"))
                 .otherwise(col("amount"))
             )
-            .withColumn("currency", upper(trim(col("currency"))))
+            .withColumn(
+                "currency_was_normalized",
+                lower(trim(col("currency"))).isin("usd", "us$")
+                & (trim(col("currency")) != lit("USD")),
+            )
+            .withColumn(
+                "currency",
+                when(lower(trim(col("currency"))).isin("usd", "us$"), lit("USD"))
+                .otherwise(upper(trim(col("currency"))))
+            )
             .withColumn(
                 "currency",
                 when(col("currency").isNull(), lit(None))
@@ -162,9 +165,24 @@ def main():
             # provider_ref: trim + null-likes -> NULL
             .withColumn("provider_ref", trim(col("provider_ref")))
             .withColumn(
+                "provider_ref_contains_potential_pii",
+                coalesce(col("provider_ref").rlike(PII_ANY_PATTERN), lit(False)),
+            )
+            # Keep a transient key so retries can still be recognized before a
+            # sensitive provider reference is redacted from the persisted row.
+            .withColumn(
+                "__provider_ref_dedup_key",
+                when(
+                    col("provider_ref").isNull()
+                    | lower(col("provider_ref")).isin(*NULL_LIKE_VALUES),
+                    lit(None).cast("string"),
+                ).otherwise(col("provider_ref")),
+            )
+            .withColumn(
                 "provider_ref",
                 when(col("provider_ref").isNull(), lit(None))
-                .when(lower(col("provider_ref")).isin(NULL_LIKES), lit(None))
+                .when(lower(col("provider_ref")).isin(*NULL_LIKE_VALUES), lit(None))
+                .when(col("provider_ref_contains_potential_pii"), lit(None))
                 .otherwise(col("provider_ref"))
             )
 
@@ -207,6 +225,74 @@ def main():
             .drop("rn")
         )
 
+        latest_payments_df = latest_payments_df.withColumn(
+            "__batch_canonical_payment_id",
+            spark_min("payment_id").over(Window.partitionBy("__provider_ref_dedup_key")),
+        )
+        if silver_exists:
+            existing_silver = spark.read.format("delta").load(SILVER_BASE_PATH)
+            existing_refs = (
+                existing_silver
+                .filter((col("is_current") == lit(True)) & col("provider_ref").isNotNull())
+                .select(
+                    col("provider_ref").alias("__provider_ref_dedup_key"),
+                    "payment_id",
+                )
+                .groupBy("__provider_ref_dedup_key")
+                .agg(spark_min("payment_id").alias("__existing_canonical_payment_id"))
+            )
+            existing_payment_evidence = (
+                existing_silver
+                .filter(col("is_current") == lit(True))
+                .select(
+                    "payment_id",
+                    col("canonical_payment_id").alias("__prior_canonical_payment_id"),
+                    col("duplicate_provider_ref").alias("__prior_duplicate_provider_ref"),
+                )
+            )
+            latest_payments_df = (
+                latest_payments_df
+                .join(existing_refs, "__provider_ref_dedup_key", "left")
+                .join(existing_payment_evidence, "payment_id", "left")
+            )
+        else:
+            latest_payments_df = (
+                latest_payments_df
+                .withColumn("__existing_canonical_payment_id", lit(None).cast("long"))
+                .withColumn("__prior_canonical_payment_id", lit(None).cast("long"))
+                .withColumn("__prior_duplicate_provider_ref", lit(False))
+            )
+
+        latest_payments_df = (
+            latest_payments_df
+            .withColumn(
+                "canonical_payment_id",
+                when(
+                    col("__provider_ref_dedup_key").isNull(),
+                    when(
+                        coalesce(col("__prior_duplicate_provider_ref"), lit(False)),
+                        coalesce(col("__prior_canonical_payment_id"), col("payment_id")),
+                    ).otherwise(col("payment_id")),
+                ).otherwise(
+                    least(col("__batch_canonical_payment_id"), col("__existing_canonical_payment_id"))
+                ),
+            )
+            .withColumn(
+                "duplicate_provider_ref",
+                when(
+                    col("__provider_ref_dedup_key").isNull(),
+                    coalesce(col("__prior_duplicate_provider_ref"), lit(False)),
+                ).otherwise(col("payment_id") != col("canonical_payment_id")),
+            )
+            .drop(
+                "__provider_ref_dedup_key",
+                "__batch_canonical_payment_id",
+                "__existing_canonical_payment_id",
+                "__prior_canonical_payment_id",
+                "__prior_duplicate_provider_ref",
+            )
+        )
+
         # 4) Enrichment / data quality flags
         # (robusto por si tus enums varían un poco)
         paid_like_statuses = ["paid", "succeeded", "success", "completed", "settled"]
@@ -219,7 +305,7 @@ def main():
             )
             .withColumn(
                 "currency_invalid",
-                col("currency").isNull() | (length(col("currency")) != lit(3))
+                col("currency").isNull() | (col("currency") != lit("USD"))
             )
             .withColumn(
                 "paid_but_paid_at_null",
@@ -233,6 +319,12 @@ def main():
                 "provider_ref_missing",
                 col("provider_ref").isNull()
             )
+            .fillna(False, subset=[
+                "amount_invalid", "currency_invalid", "paid_but_paid_at_null",
+                "pending_but_paid_at_not_null", "provider_ref_missing",
+                "provider_ref_contains_potential_pii", "duplicate_provider_ref",
+                "currency_was_normalized",
+            ])
         )
 
         # SCD hash (business columns only)
@@ -248,6 +340,10 @@ def main():
                         coalesce(col("status").cast("string"), lit("")),
                         coalesce(col("amount").cast("string"), lit("")),
                         coalesce(col("currency").cast("string"), lit("")),
+                        coalesce(col("provider_ref").cast("string"), lit("")),
+                        coalesce(col("provider_ref_contains_potential_pii").cast("string"), lit("")),
+                        coalesce(col("duplicate_provider_ref").cast("string"), lit("")),
+                        coalesce(col("canonical_payment_id").cast("string"), lit("")),
                         coalesce(col("paid_at").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),
@@ -274,9 +370,8 @@ def main():
             return
 
         # 6) Merge incremental (SCD2)
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -337,6 +432,10 @@ def main():
                 "paid_but_paid_at_null": "s.paid_but_paid_at_null",
                 "pending_but_paid_at_not_null": "s.pending_but_paid_at_not_null",
                 "provider_ref_missing": "s.provider_ref_missing",
+                "provider_ref_contains_potential_pii": "s.provider_ref_contains_potential_pii",
+                "duplicate_provider_ref": "s.duplicate_provider_ref",
+                "canonical_payment_id": "s.canonical_payment_id",
+                "currency_was_normalized": "s.currency_was_normalized",
 
                 # SCD2 fields
                 "scd_hash": "s.scd_hash",

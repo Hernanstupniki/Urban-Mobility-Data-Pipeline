@@ -9,6 +9,8 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
 
+from src.common.spark import build_spark
+
 # Config
 JOB_NAME = "zones_bronze_to_silver"
 
@@ -73,7 +75,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -81,7 +86,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -96,20 +101,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -225,9 +217,8 @@ def main():
             return
 
         # 7) Merge incremental (SCD2)
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")

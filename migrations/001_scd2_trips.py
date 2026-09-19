@@ -1,80 +1,52 @@
-import os
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, sha2, concat_ws, coalesce
+"""Bring Silver trips onto the canonical SCD2 hash contract."""
+
 from delta.tables import DeltaTable
+from pyspark.sql.functions import col, coalesce, concat_ws, lit, sha2
 
-ENV = os.getenv("ENV", "dev")
-SILVER_PATH = f"data/{ENV}/silver/trips"
+from src.common.config import Settings
+from src.common.logging import log_event
+from src.common.spark import build_spark
 
-spark = (
-    SparkSession.builder
-    .appName("bootstrap_trips_scd2")
-    .getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
 
-# 1) If dont exist, done
-if not DeltaTable.isDeltaTable(spark, SILVER_PATH):
-    print(f"[bootstrap_trips_scd2] Silver trips dont exist (not Delta): {SILVER_PATH}")
-    spark.stop()
-    raise SystemExit(0)
+JOB_NAME = "migration_001_scd2_trips"
+HASH_COLUMNS = [
+    "passenger_id", "driver_id", "vehicle_id", "pickup_zone_id", "dropoff_zone_id",
+    "status", "requested_at", "accepted_at", "started_at", "ended_at", "canceled_at",
+    "estimated_distance_km", "actual_distance_km", "start_lat", "start_lng", "end_lat", "end_lng",
+    "cancel_reason", "cancel_by", "cancel_note", "fare_amount", "source_system",
+]
 
-df = spark.read.format("delta").load(SILVER_PATH)
 
-required_cols = ["valid_from", "valid_to", "is_current", "scd_hash"]
-missing = [c for c in required_cols if c not in df.columns]
-
-# 2) If exists, done
-if not missing:
-    print("[bootstrap_trips_scd2] SCD2 columns already present. Nothing to do.")
-    spark.stop()
-    raise SystemExit(0)
-
-print("[bootstrap_trips_scd2] Missing columns:", missing)
-
-# 3) Add SCD2 columns + basic backfill
-out = df
-# scd_hash same as scd_ready_df (same columns)
-if "scd_hash" in missing:
-    out = out.withColumn(
-        "scd_hash",
-        sha2(
-            concat_ws(
-                "||",
-                coalesce(col("passenger_id").cast("string"), lit("")),
-                coalesce(col("driver_id").cast("string"), lit("")),
-                coalesce(col("vehicle_id").cast("string"), lit("")),
-                coalesce(col("status").cast("string"), lit("")),
-                coalesce(col("requested_at").cast("string"), lit("")),
-                coalesce(col("accepted_at").cast("string"), lit("")),
-                coalesce(col("started_at").cast("string"), lit("")),
-                coalesce(col("ended_at").cast("string"), lit("")),
-                coalesce(col("canceled_at").cast("string"), lit("")),
-                coalesce(col("estimated_distance_km").cast("string"), lit("")),
-                coalesce(col("actual_distance_km").cast("string"), lit("")),
-                coalesce(col("batch_id").cast("string"), lit("")),
-                coalesce(col("source_system").cast("string"), lit(""))
-            ),
-            256
+def main() -> None:
+    settings = Settings.from_env()
+    path = settings.path("silver", "trips")
+    spark = build_spark(JOB_NAME)
+    try:
+        if not DeltaTable.isDeltaTable(spark, path):
+            log_event(JOB_NAME, "silver_trips", "SKIPPED", reason="not_delta", target=path)
+            return
+        frame = spark.read.format("delta").load(path)
+        missing_source = [name for name in HASH_COLUMNS if name not in frame.columns]
+        if missing_source:
+            raise ValueError(f"Cannot calculate canonical hash; missing columns: {missing_source}")
+        output = frame.withColumn(
+            "scd_hash",
+            sha2(concat_ws("||", *[coalesce(col(name).cast("string"), lit("")) for name in HASH_COLUMNS]), 256),
         )
-    )
+        if "valid_from" not in output.columns:
+            output = output.withColumn("valid_from", col("raw_loaded_at"))
+        if "valid_to" not in output.columns:
+            output = output.withColumn("valid_to", lit(None).cast("timestamp"))
+        if "is_current" not in output.columns:
+            output = output.withColumn("is_current", lit(True))
+        output = output.cache()
+        row_count = output.count()
+        output.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
+        output.unpersist()
+        log_event(JOB_NAME, "silver_trips", "SUCCESS", row_count=row_count, target=path)
+    finally:
+        spark.stop()
 
-if "valid_from" in missing:
-    out = out.withColumn("valid_from", col("raw_loaded_at"))
 
-if "valid_to" in missing:
-    out = out.withColumn("valid_to", lit(None).cast("timestamp"))
-
-if "is_current" in missing:
-    out = out.withColumn("is_current", lit(True))
-
-# 4) Replace existing data
-(
-    out.write.format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .save(SILVER_PATH)
-)
-
-print("[bootstrap_trips_scd2] Bootstrap completed. Added:", missing)
-spark.stop()
+if __name__ == "__main__":
+    main()

@@ -5,10 +5,12 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit, min as spark_min,
     max as spark_max, to_date, current_timestamp, coalesce,
-    trim, lower, upper, sha2, concat_ws
+    trim, lower, upper, regexp_replace, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
+
+from src.common.spark import build_spark
 
 # Config
 JOB_NAME = "vehicles_bronze_to_silver"
@@ -74,7 +76,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -82,7 +87,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -97,19 +102,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -140,16 +133,35 @@ def main():
             .withColumn("driver_id", col("driver_id").cast("long"))
             # Strings
             .withColumn("plate_number", upper(trim(col("plate_number"))))
-            .withColumn("vehicle_type", lower(trim(col("vehicle_type"))))
+            .withColumn(
+                "vehicle_type_was_normalized",
+                col("vehicle_type").isNotNull()
+                & (
+                    col("vehicle_type")
+                    != when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("sedan", "saloon"), lit("sedan"))
+                    .when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("hatchback", "hatch back"), lit("hatchback"))
+                    .when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("motorbike", "motorcycle", "moto", "bike"), lit("motorbike"))
+                    .otherwise(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " "))
+                ),
+            )
+            .withColumn(
+                "vehicle_type",
+                when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("sedan", "saloon"), lit("sedan"))
+                .when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("hatchback", "hatch back"), lit("hatchback"))
+                .when(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " ").isin("motorbike", "motorcycle", "moto", "bike"), lit("motorbike"))
+                .otherwise(regexp_replace(lower(trim(col("vehicle_type"))), r"\s+", " "))
+            )
             .withColumn("make", trim(col("make")))
             .withColumn("model", trim(col("model")))
             # Numerics
             .withColumn("year", col("year").cast("int"))
             # status normalized
             .withColumn("status", lower(trim(col("status"))))
+            .withColumn("is_deleted", coalesce(col("is_deleted").cast("boolean"), lit(False)))
             # Timestamps
             .withColumn("created_at", col("created_at").cast("timestamp"))
             .withColumn("updated_at", col("updated_at").cast("timestamp"))
+            .withColumn("deleted_at", col("deleted_at").cast("timestamp"))
             .withColumn("raw_loaded_at", col("raw_loaded_at").cast("timestamp"))
             # Metadata
             .withColumn("source_system", trim(col("source_system")))
@@ -219,7 +231,11 @@ def main():
                 .when((col("year") < lit(1980)) | (col("year") > (lit(datetime.now().year) + lit(1))), lit(True))
                 .otherwise(lit(False))
             )
-            .withColumn("invalid_status", ~col("status").isin(*ALLOWED_STATUS))
+            .withColumn("invalid_status", coalesce(~col("status").isin(*ALLOWED_STATUS), lit(True)))
+            .fillna(False, subset=[
+                "missing_plate_number", "missing_vehicle_type", "invalid_vehicle_type",
+                "missing_driver_id", "invalid_year", "invalid_status", "vehicle_type_was_normalized",
+            ])
         )
 
         # 5) SCD2 prep
@@ -231,11 +247,15 @@ def main():
                     concat_ws(
                         "||",
                         coalesce(col("driver_id").cast("string"), lit("")),
+                        coalesce(col("plate_number").cast("string"), lit("")),
                         coalesce(col("vehicle_type").cast("string"), lit("")),
+                        coalesce(col("vehicle_type_was_normalized").cast("string"), lit("")),
                         coalesce(col("make").cast("string"), lit("")),
                         coalesce(col("model").cast("string"), lit("")),
                         coalesce(col("year").cast("string"), lit("")),
                         coalesce(col("status").cast("string"), lit("")),
+                        coalesce(col("is_deleted").cast("string"), lit("")),
+                        coalesce(col("deleted_at").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),
                     256
@@ -263,9 +283,8 @@ def main():
             return
 
         # 7) Merge incremental (SCD2)
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -305,8 +324,10 @@ def main():
                 "model": "s.model",
                 "year": "s.year",
                 "status": "s.status",
+                "is_deleted": "s.is_deleted",
                 "created_at": "s.created_at",
                 "updated_at": "s.updated_at",
+                "deleted_at": "s.deleted_at",
 
                 "batch_id": "s.batch_id",
                 "source_system": "s.source_system",
@@ -316,6 +337,7 @@ def main():
                 "missing_plate_number": "s.missing_plate_number",
                 "missing_vehicle_type": "s.missing_vehicle_type",
                 "invalid_vehicle_type": "s.invalid_vehicle_type",
+                "vehicle_type_was_normalized": "s.vehicle_type_was_normalized",
                 "missing_driver_id": "s.missing_driver_id",
                 "invalid_year": "s.invalid_year",
                 "invalid_status": "s.invalid_status",

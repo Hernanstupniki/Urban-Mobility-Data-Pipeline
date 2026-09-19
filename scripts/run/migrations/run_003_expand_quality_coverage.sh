@@ -11,4 +11,5 @@ if [[ ! -f "$RUN_DIR/_common.sh" ]]; then
   exit 1
 fi
 source "$RUN_DIR/_common.sh"
-run_spark_job "src/silver/ratings_bronze_to_silver.py" "$@"
+
+run_spark_job "migrations/003_expand_quality_coverage.py" "$@"

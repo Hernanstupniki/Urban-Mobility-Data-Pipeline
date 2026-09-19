@@ -4,10 +4,22 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, row_number, when, lit, min as spark_min,
-    max as spark_max, to_date, current_timestamp, coalesce, abs as spark_abs, trim, lower, cast, sha2, concat_ws
+    max as spark_max, to_date, current_timestamp, coalesce, abs as spark_abs, trim, lower,
+    regexp_replace, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
+
+from src.common.data_quality import (
+    MAX_ACCEPTANCE_DELAY_MINUTES,
+    MAX_TRIP_DURATION_MINUTES,
+    NULL_LIKE_VALUES,
+    PII_ANY_PATTERN,
+    PII_CONTACT_SUFFIX_PATTERN,
+    PII_EMAIL_PATTERN,
+    PII_PHONE_PATTERN,
+)
+from src.common.spark import build_spark
 
 # Config
 JOB_NAME = "trips_bronze_to_silver"
@@ -15,6 +27,7 @@ JOB_NAME = "trips_bronze_to_silver"
 ENV = os.getenv("ENV", "dev")
 BRONZE_BASE_PATH = f"data/{ENV}/bronze/trips"
 SILVER_BASE_PATH = f"data/{ENV}/silver/trips"
+SILVER_VEHICLES_PATH = f"data/{ENV}/silver/vehicles"
 
 # Delta control table (watermarks)
 CONTROL_BASE_PATH = f"data/{ENV}/_control"
@@ -73,7 +86,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -81,7 +97,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -95,20 +111,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -129,7 +132,6 @@ def main():
                 .filter(col("raw_loaded_at") > lit(last_ts))
             )
 
-        NULL_LIKES = ["null", "n/a", "none", "-", ""]
         bronze_df = (
             bronze_reader
             # Ids
@@ -161,11 +163,19 @@ def main():
             # cancel_note: trim + null-likes -> NULL
             .withColumn("cancel_note", trim(col("cancel_note")))
             .withColumn(
+                "cancel_note_contains_potential_pii",
+                coalesce(col("cancel_note").rlike(PII_ANY_PATTERN), lit(False)),
+            )
+            .withColumn("cancel_note", regexp_replace(col("cancel_note"), PII_CONTACT_SUFFIX_PATTERN, ""))
+            .withColumn("cancel_note", regexp_replace(col("cancel_note"), PII_EMAIL_PATTERN, "[REDACTED]"))
+            .withColumn("cancel_note", regexp_replace(col("cancel_note"), PII_PHONE_PATTERN, "[REDACTED]"))
+            .withColumn("cancel_note", trim(col("cancel_note")))
+            .withColumn(
                 "cancel_note",
                 when(
                     col("cancel_note").isNull(),
                     lit(None))
-                .when(lower(col("cancel_note")).isin(NULL_LIKES),
+                .when(lower(col("cancel_note")).isin(*NULL_LIKE_VALUES),
                       lit(None)
                 ).otherwise(col("cancel_note")))
             # Status
@@ -218,23 +228,49 @@ def main():
             .drop("rn")
         )
 
+        if DeltaTable.isDeltaTable(spark, SILVER_VEHICLES_PATH):
+            vehicle_lookup = (
+                spark.read.format("delta").load(SILVER_VEHICLES_PATH)
+                .filter(col("is_current") == lit(True))
+                .select(
+                    col("vehicle_id").alias("lookup_vehicle_id"),
+                    col("driver_id").alias("registered_driver_id"),
+                )
+                .dropDuplicates(["lookup_vehicle_id"])
+            )
+            latest_trips_df = latest_trips_df.join(
+                vehicle_lookup,
+                latest_trips_df["vehicle_id"] == vehicle_lookup["lookup_vehicle_id"],
+                "left",
+            ).drop("lookup_vehicle_id")
+        else:
+            latest_trips_df = latest_trips_df.withColumn("registered_driver_id", lit(None).cast("long"))
+
         # 4) Enrichment
         enriched_df = (
             latest_trips_df
-            .withColumn(
-                "has_distance_in_invalid_status",
-                when(
-                    (col("actual_distance_km").isNotNull()) &
-                    (col("actual_distance_km") > 0) &
-                    (~col("status").isin("completed", "started")),
-                    lit(True)
-                )
-                .when(
-                    (col("actual_distance_km").isNull()) & 
-                    (col("status").isin("completed")), 
-                    lit(True))
-                    .otherwise(lit(False))
-            )
+            .withColumn("distance_present_in_invalid_status", (
+                col("actual_distance_km").isNotNull()
+                & (col("actual_distance_km") > 0)
+                & (~col("status").isin("completed", "started"))
+            ).cast("boolean"))
+            .withColumn("completed_missing_distance", (
+                (col("status") == lit("completed")) & col("actual_distance_km").isNull()
+            ).cast("boolean"))
+            .withColumn("has_distance_in_invalid_status", (
+                col("distance_present_in_invalid_status") | col("completed_missing_distance")
+            ).cast("boolean"))
+            .withColumn("start_coordinates_invalid", (
+                col("start_lat").isNotNull() & col("start_lng").isNotNull()
+                & ((col("start_lat") < -90) | (col("start_lat") > 90) | (col("start_lng") < -180) | (col("start_lng") > 180))
+            ).cast("boolean"))
+            .withColumn("end_coordinates_invalid", (
+                col("end_lat").isNotNull() & col("end_lng").isNotNull()
+                & ((col("end_lat") < -90) | (col("end_lat") > 90) | (col("end_lng") < -180) | (col("end_lng") > 180))
+            ).cast("boolean"))
+            .withColumn("coordinates_missing", (
+                col("start_lat").isNull() | col("start_lng").isNull() | col("end_lat").isNull() | col("end_lng").isNull()
+            ).cast("boolean"))
             .withColumn(
                 "distance_diff_km",
                     when(
@@ -278,6 +314,58 @@ def main():
                 col("started_at").isNotNull() &
                 (col("ended_at") < col("started_at"))
             )
+            .withColumn(
+                "driver_vehicle_mismatch",
+                col("driver_id").isNotNull()
+                & col("vehicle_id").isNotNull()
+                & col("registered_driver_id").isNotNull()
+                & (col("driver_id") != col("registered_driver_id")),
+            )
+            .withColumn(
+                "vehicle_driver_unverifiable",
+                col("vehicle_id").isNotNull() & col("registered_driver_id").isNull(),
+            )
+            .withColumn(
+                "acceptance_delay_minutes",
+                when(
+                    col("accepted_at").isNotNull() & col("requested_at").isNotNull(),
+                    (col("accepted_at").cast("long") - col("requested_at").cast("long")) / lit(60.0),
+                ).otherwise(lit(None).cast("double")),
+            )
+            .withColumn(
+                "trip_duration_minutes",
+                when(
+                    col("ended_at").isNotNull() & col("started_at").isNotNull(),
+                    (col("ended_at").cast("long") - col("started_at").cast("long")) / lit(60.0),
+                ).otherwise(lit(None).cast("double")),
+            )
+            .withColumn(
+                "is_acceptance_delay_outlier",
+                col("acceptance_delay_minutes") > lit(MAX_ACCEPTANCE_DELAY_MINUTES),
+            )
+            .withColumn(
+                "is_trip_duration_outlier",
+                col("trip_duration_minutes") > lit(MAX_TRIP_DURATION_MINUTES),
+            )
+            .drop("registered_driver_id")
+            .fillna(False, subset=[
+                "distance_present_in_invalid_status",
+                "completed_missing_distance",
+                "has_distance_in_invalid_status",
+                "start_coordinates_invalid",
+                "end_coordinates_invalid",
+                "coordinates_missing",
+                "is_distance_outlier",
+                "completed_but_ended_at_null",
+                "accepted_before_requested",
+                "started_before_accepted",
+                "ended_before_started",
+                "driver_vehicle_mismatch",
+                "vehicle_driver_unverifiable",
+                "is_acceptance_delay_outlier",
+                "is_trip_duration_outlier",
+                "cancel_note_contains_potential_pii",
+            ])
         )
 
         scd_ready_df = (
@@ -310,6 +398,8 @@ def main():
 
                         coalesce(col("cancel_reason").cast("string"), lit("")),
                         coalesce(col("cancel_by").cast("string"), lit("")),
+                        coalesce(col("cancel_note").cast("string"), lit("")),
+                        coalesce(col("cancel_note_contains_potential_pii").cast("string"), lit("")),
 
                         coalesce(col("fare_amount").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
@@ -337,9 +427,8 @@ def main():
             return
 
         # 6) Merge incremental
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -413,13 +502,25 @@ def main():
                 "raw_loaded_at": "s.raw_loaded_at",
 
                 # Enrichment / data quality flags
+                "distance_present_in_invalid_status": "s.distance_present_in_invalid_status",
+                "completed_missing_distance": "s.completed_missing_distance",
                 "has_distance_in_invalid_status": "s.has_distance_in_invalid_status",
+                "start_coordinates_invalid": "s.start_coordinates_invalid",
+                "end_coordinates_invalid": "s.end_coordinates_invalid",
+                "coordinates_missing": "s.coordinates_missing",
                 "distance_diff_km": "s.distance_diff_km",
                 "is_distance_outlier": "s.is_distance_outlier",
                 "completed_but_ended_at_null": "s.completed_but_ended_at_null",
                 "accepted_before_requested": "s.accepted_before_requested",
                 "started_before_accepted": "s.started_before_accepted",
                 "ended_before_started": "s.ended_before_started",
+                "driver_vehicle_mismatch": "s.driver_vehicle_mismatch",
+                "vehicle_driver_unverifiable": "s.vehicle_driver_unverifiable",
+                "acceptance_delay_minutes": "s.acceptance_delay_minutes",
+                "trip_duration_minutes": "s.trip_duration_minutes",
+                "is_acceptance_delay_outlier": "s.is_acceptance_delay_outlier",
+                "is_trip_duration_outlier": "s.is_trip_duration_outlier",
+                "cancel_note_contains_potential_pii": "s.cancel_note_contains_potential_pii",
 
                 # SCD2 fields
                 "scd_hash": "s.scd_hash",

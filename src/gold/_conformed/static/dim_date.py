@@ -15,6 +15,8 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
+from src.common.spark import build_spark
+
 # Config
 JOB_NAME = "dim_date_build_gold_conformed"
 
@@ -91,25 +93,17 @@ def infer_date_range_from_silver(spark: SparkSession):
 
 
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning (same spirit as yours)
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     try:
         # 1) Resolve date range
+        if bool(DATE_START) != bool(DATE_END):
+            raise ValueError("DATE_START and DATE_END must be provided together")
         if DATE_START and DATE_END:
             start_d = datetime.strptime(DATE_START, "%Y-%m-%d").date()
             end_d = datetime.strptime(DATE_END, "%Y-%m-%d").date()
+            if start_d > end_d:
+                raise ValueError("DATE_START cannot be after DATE_END")
         else:
             inferred_start, inferred_end = infer_date_range_from_silver(spark)
             if inferred_start is None or inferred_end is None:

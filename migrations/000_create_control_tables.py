@@ -1,22 +1,24 @@
-import os
-from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType
-from delta.tables import DeltaTable
+"""Create the shared ETL control table without overwriting existing state."""
 
-ENV = os.getenv("ENV", "dev")
-CONTROL_PATH = f"data/{ENV}/_control/etl_control"
+from src.common.config import Settings
+from src.common.delta_control import ensure_etl_control_table
+from src.common.logging import log_event
+from src.common.spark import build_spark
 
-spark = SparkSession.builder.appName("bootstrap_control_tables").getOrCreate()
 
-schema = StructType([
-    StructField("job_name", StringType(), False),
-    StructField("last_loaded_ts", TimestampType(), True),
-    StructField("last_success_ts", TimestampType(), True),
-    StructField("last_status", StringType(), True),
-])
+JOB_NAME = "migration_000_create_control_tables"
 
-if not DeltaTable.isDeltaTable(spark, CONTROL_PATH):
-    spark.createDataFrame([], schema).write.format("delta").mode("overwrite").save(CONTROL_PATH)
-    print("Created Delta control table:", CONTROL_PATH)
 
-spark.stop()
+def main() -> None:
+    settings = Settings.from_env()
+    spark = build_spark(JOB_NAME)
+    try:
+        path = settings.path("_control", "etl_control")
+        ensure_etl_control_table(spark, path)
+        log_event(JOB_NAME, "etl_control", "SUCCESS", target=path)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

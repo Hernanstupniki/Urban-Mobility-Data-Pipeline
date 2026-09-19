@@ -5,10 +5,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, lit, current_timestamp,
     max as spark_max, min as spark_min, to_date, coalesce,
-    row_number, when, trim, lower, sha2, concat_ws
+    row_number, when, trim, lower, initcap, least, length, regexp_replace, sha2, concat_ws
 )
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
+
+from src.common.data_quality import NULL_LIKE_VALUES
+from src.common.spark import build_spark
 
 # Config
 JOB_NAME = "passengers_bronze_to_silver"
@@ -72,7 +75,10 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
             [(job_name, last_loaded_ts, status)],
             "job_name string, last_loaded_ts timestamp, last_status string"
         )
-        .withColumn("last_success_ts", current_timestamp())
+        .withColumn(
+            "last_success_ts",
+            current_timestamp() if status == "SUCCESS" else lit(None).cast("timestamp"),
+        )
     )
 
     (
@@ -80,7 +86,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
         .merge(updates.alias("s"), "t.job_name = s.job_name")
         .whenMatchedUpdate(set={
             "last_loaded_ts": "coalesce(s.last_loaded_ts, t.last_loaded_ts)",
-            "last_success_ts": "s.last_success_ts",
+            "last_success_ts": "coalesce(s.last_success_ts, t.last_success_ts)",
             "last_status": "s.last_status",
         })
         .whenNotMatchedInsert(values={
@@ -95,19 +101,7 @@ def upsert_etl_control(spark: SparkSession, job_name: str, last_loaded_ts, statu
 
 # Main
 def main():
-    spark = (
-        SparkSession.builder
-        .appName(JOB_NAME)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV / WSL tuning
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
+    spark = build_spark(JOB_NAME)
 
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
@@ -128,8 +122,6 @@ def main():
                 .filter(col("raw_loaded_at") > lit(last_ts))
             )
 
-        NULL_LIKES = ["null", "n/a", "none", "-", ""]
-
         bronze_df = (
             bronze_reader
             # Ids
@@ -138,7 +130,7 @@ def main():
             .withColumn("full_name", trim(col("full_name")))
             .withColumn("email", lower(trim(col("email"))))
             .withColumn("phone", trim(col("phone")))
-            .withColumn("city", trim(col("city")))
+            .withColumn("city", initcap(trim(col("city"))))
             # Soft delete fields
             .withColumn("is_deleted", col("is_deleted").cast("boolean"))
             # Timestamps
@@ -156,13 +148,13 @@ def main():
             .withColumn(
                 "email",
                 when(col("email").isNull(), lit(None))
-                .when(lower(col("email")).isin(NULL_LIKES), lit(None))
+                .when(lower(col("email")).isin(*NULL_LIKE_VALUES), lit(None))
                 .otherwise(col("email"))
             )
             .withColumn(
                 "phone",
                 when(col("phone").isNull(), lit(None))
-                .when(lower(col("phone")).isin(NULL_LIKES), lit(None))
+                .when(lower(col("phone")).isin(*NULL_LIKE_VALUES), lit(None))
                 .otherwise(col("phone"))
             )
         )
@@ -219,6 +211,41 @@ def main():
             .drop("rn")
         )
 
+        latest_df = latest_df.withColumn(
+            "__batch_canonical_passenger_id",
+            spark_min("passenger_id").over(Window.partitionBy("email")),
+        )
+        if silver_exists:
+            existing_emails = (
+                spark.read.format("delta").load(SILVER_BASE_PATH)
+                .filter((col("is_current") == lit(True)) & col("email").isNotNull())
+                .groupBy("email")
+                .agg(spark_min("passenger_id").alias("__existing_canonical_passenger_id"))
+            )
+            latest_df = latest_df.join(existing_emails, "email", "left")
+        else:
+            latest_df = latest_df.withColumn(
+                "__existing_canonical_passenger_id", lit(None).cast("long")
+            )
+
+        latest_df = (
+            latest_df
+            .withColumn(
+                "canonical_passenger_id",
+                when(col("email").isNull(), col("passenger_id")).otherwise(
+                    least(
+                        col("__batch_canonical_passenger_id"),
+                        col("__existing_canonical_passenger_id"),
+                    )
+                ),
+            )
+            .withColumn(
+                "potential_duplicate_passenger",
+                col("email").isNotNull() & (col("passenger_id") != col("canonical_passenger_id")),
+            )
+            .drop("__batch_canonical_passenger_id", "__existing_canonical_passenger_id")
+        )
+
         # 4) Simple quality/enrichment flags
         enriched_df = (
             latest_df
@@ -230,6 +257,17 @@ def main():
                 when(col("email").isNull(), lit(False))
                 .otherwise(~col("email").rlike(r"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
             )
+            .withColumn(
+                "invalid_phone_format",
+                when(col("phone").isNull(), lit(False)).otherwise(
+                    (length(regexp_replace(col("phone"), r"\D", "")) < lit(7))
+                    | (length(regexp_replace(col("phone"), r"\D", "")) > lit(15))
+                ),
+            )
+            .fillna(False, subset=[
+                "missing_full_name", "missing_email", "missing_phone", "invalid_email_format",
+                "invalid_phone_format", "potential_duplicate_passenger",
+            ])
         )
 
         # 5) SCD2 prep
@@ -246,6 +284,8 @@ def main():
                         coalesce(col("city").cast("string"), lit("")),
                         coalesce(col("is_deleted").cast("string"), lit("")),
                         coalesce(col("deleted_at").cast("string"), lit("")),
+                        coalesce(col("canonical_passenger_id").cast("string"), lit("")),
+                        coalesce(col("potential_duplicate_passenger").cast("string"), lit("")),
                         coalesce(col("source_system").cast("string"), lit(""))
                     ),
                     256
@@ -296,6 +336,9 @@ def main():
                         "missing_email": "true",
                         "missing_phone": "true",
                         "invalid_email_format": "false",
+                        "invalid_phone_format": "false",
+                        "potential_duplicate_passenger": "false",
+                        "canonical_passenger_id": "t.passenger_id",
                         "missing_full_name": "false",
                     })
                     .execute()
@@ -309,9 +352,8 @@ def main():
             return
 
         # 7) Merge incremental (SCD2)
-        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "1" if ENV == "dev" else "0") == "1"
+        AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
             print("[CONFIG] Delta schema auto-merge: ENABLED")
         else:
             print("[CONFIG] Delta schema auto-merge: DISABLED")
@@ -362,6 +404,9 @@ def main():
                 "missing_email": "s.missing_email",
                 "missing_phone": "s.missing_phone",
                 "invalid_email_format": "s.invalid_email_format",
+                "invalid_phone_format": "s.invalid_phone_format",
+                "canonical_passenger_id": "s.canonical_passenger_id",
+                "potential_duplicate_passenger": "s.potential_duplicate_passenger",
 
                 # SCD2
                 "scd_hash": "s.scd_hash",
@@ -401,6 +446,9 @@ def main():
                     "missing_email": "true",
                     "missing_phone": "true",
                     "invalid_email_format": "false",
+                    "invalid_phone_format": "false",
+                    "potential_duplicate_passenger": "false",
+                    "canonical_passenger_id": "t.passenger_id",
                     "missing_full_name": "false",
                 })
                 .execute()
