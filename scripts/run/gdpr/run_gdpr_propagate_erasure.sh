@@ -1,33 +1,14 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-echo "========================================"
-echo "Starting GDPR Propagate Erasure -> Lake"
-echo "========================================"
-
-# Default ENV if not provided
-ENV="${ENV:-dev}"
-echo "[CONFIG] ENV=$ENV"
-export ENV="$ENV"
-
-# OLTP connection (usa lo que ya tengas en env; solo setea defaults si faltan)
-export DB_HOST="${DB_HOST:-localhost}"
-export DB_NAME="${DB_NAME:-mobility_oltp}"
-export DB_USER="${DB_USER:-postgres}"
-# DB_PASSWORD: debe venir seteado en tu entorno (como ya haces en otros jobs)
-
-# Paths (defaults)
-export BRONZE_PASSENGERS_PATH="${BRONZE_PASSENGERS_PATH:-data/${ENV}/bronze/passengers}"
-export SILVER_PASSENGERS_PATH="${SILVER_PASSENGERS_PATH:-data/${ENV}/silver/passengers}"
-
-# Optional
-export ANON_NAME="${ANON_NAME:-ANONYMIZED}"
-
-spark-submit \
-  --packages io.delta:delta-spark_2.12:3.1.0 \
-  --jars /home/hernan/jars/postgresql-42.7.8.jar \
-  gdpr/gdpr_propagate_erasure.py
-
-echo "========================================"
-echo "GDPR Propagate Erasure finished OK"
-echo "========================================"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="$SCRIPT_DIR"
+while [[ "$RUN_DIR" != "/" && ! -f "$RUN_DIR/_common.sh" ]]; do
+  RUN_DIR="$(dirname "$RUN_DIR")"
+done
+if [[ ! -f "$RUN_DIR/_common.sh" ]]; then
+  echo "Unable to locate scripts/run/_common.sh from $SCRIPT_DIR" >&2
+  exit 1
+fi
+source "$RUN_DIR/_common.sh"
+run_spark_jdbc_job "gdpr/gdpr_propagate_erasure.py" "$@"

@@ -201,7 +201,8 @@ ALTER TABLE mobility.gdpr_requests
 -- 3) Seed zones (idempotent)
 -- ------------------------------------------------------------
 INSERT INTO zones (zone_name, city, region)
-VALUES
+SELECT seed.zone_name, seed.city, seed.region
+FROM (VALUES
   ('Manhattan', 'New York', 'NY'),
   ('Brooklyn', 'New York', 'NY'),
   ('Queens', 'New York', 'NY'),
@@ -228,7 +229,14 @@ VALUES
   ('Downtown', 'Miami', 'FL'),
   ('Brickell', 'Miami', 'FL'),
   ('Wynwood', 'Miami', 'FL')
-ON CONFLICT DO NOTHING;
+) AS seed(zone_name, city, region)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM zones existing
+  WHERE existing.zone_name = seed.zone_name
+    AND existing.city IS NOT DISTINCT FROM seed.city
+    AND existing.region IS NOT DISTINCT FROM seed.region
+);
 
 -- ------------------------------------------------------------
 -- 4) Indexes

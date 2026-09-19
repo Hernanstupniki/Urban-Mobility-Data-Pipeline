@@ -35,11 +35,14 @@ from faker import Faker
 # Configuration (env-driven)
 # ============================================================
 
+# Dual naming (OLTP_DB_* preferred, DB_* fallback) matches src/common/config.py:
+# containers receive OLTP_DB_* from docker-compose, host CLI exports DB_*.
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "dbname": os.getenv("DB_NAME", "mobility_oltp"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD"),
+    "host": os.getenv("OLTP_DB_HOST", os.getenv("DB_HOST", "localhost")),
+    "port": int(os.getenv("OLTP_DB_PORT", os.getenv("DB_PORT", "5432"))),
+    "dbname": os.getenv("OLTP_DB_NAME", os.getenv("DB_NAME", "mobility_oltp")),
+    "user": os.getenv("OLTP_DB_USER", os.getenv("DB_USER", "postgres")),
+    "password": os.getenv("OLTP_DB_PASSWORD", os.getenv("DB_PASSWORD")),
 }
 
 # Per-execution volume
@@ -100,6 +103,85 @@ RATINGS_COMMENT_RATE = float(os.getenv("RATINGS_COMMENT_RATE", "0.25"))         
 RATINGS_COMMENT_PII_RATE = float(os.getenv("RATINGS_COMMENT_PII_RATE", "0.05"))   # % comments with accidental PII
 PAYMENT_PROVIDER_REF_RATE = float(os.getenv("PAYMENT_PROVIDER_REF_RATE", "0.30")) # % payments with provider_ref
 
+# --- Broader, domain-aware quality noise ---
+TEXT_FORMAT_NOISE_RATE = float(os.getenv("TEXT_FORMAT_NOISE_RATE", "0.15"))
+CATEGORY_VARIANT_RATE = float(os.getenv("CATEGORY_VARIANT_RATE", "0.12"))
+INVALID_CONTACT_RATE = float(os.getenv("INVALID_CONTACT_RATE", "0.04"))
+DUPLICATE_PASSENGER_RATE = float(os.getenv("DUPLICATE_PASSENGER_RATE", "0.03"))
+DUPLICATE_PAYMENT_RATE = float(os.getenv("DUPLICATE_PAYMENT_RATE", "0.03"))
+PAYMENT_PROVIDER_REF_PII_RATE = float(os.getenv("PAYMENT_PROVIDER_REF_PII_RATE", "0.02"))
+CANCEL_NOTE_PII_RATE = float(os.getenv("CANCEL_NOTE_PII_RATE", "0.03"))
+LONG_ACCEPTANCE_DELAY_RATE = float(os.getenv("LONG_ACCEPTANCE_DELAY_RATE", "0.02"))
+LONG_TRIP_DURATION_RATE = float(os.getenv("LONG_TRIP_DURATION_RATE", "0.02"))
+DISTANCE_OUTLIER_RATE = float(os.getenv("DISTANCE_OUTLIER_RATE", "0.03"))
+PAYMENT_TIMESTAMP_INCONSISTENCY_RATE = float(
+    os.getenv("PAYMENT_TIMESTAMP_INCONSISTENCY_RATE", "0.03")
+)
+
+# Optional reproducibility. The default remains non-deterministic; set this in
+# tests or demos when the exact dirty-data distribution must be repeatable.
+RANDOM_SEED = os.getenv("RANDOM_SEED")
+
+DIRTY_DATA_RATES = {
+    "BROKEN_RATE": BROKEN_RATE,
+    "INVALID_DISTANCE_IN_WRONG_STATUS_RATE": INVALID_DISTANCE_IN_WRONG_STATUS_RATE,
+    "MISSING_DISTANCE_ON_COMPLETED_RATE": MISSING_DISTANCE_ON_COMPLETED_RATE,
+    "MISSING_DISTANCE_ON_STARTED_RATE": MISSING_DISTANCE_ON_STARTED_RATE,
+    "CANCEL_NOTE_GARBAGE_RATE": CANCEL_NOTE_GARBAGE_RATE,
+    "CANCEL_NOTE_NULLLIKE_RATE": CANCEL_NOTE_NULLLIKE_RATE,
+    "CANCEL_NOTE_EMPTY_STRING_RATE": CANCEL_NOTE_EMPTY_STRING_RATE,
+    "TIME_WEIRDNESS_RATE": TIME_WEIRDNESS_RATE,
+    "COORDS_MISSING_RATE": COORDS_MISSING_RATE,
+    "COORDS_OUT_OF_RANGE_RATE": COORDS_OUT_OF_RANGE_RATE,
+    "VEHICLE_DRIVER_MISMATCH_RATE": VEHICLE_DRIVER_MISMATCH_RATE,
+    "HIGH_PRECISION_NUMERIC_RATE": HIGH_PRECISION_NUMERIC_RATE,
+    "MISSING_ENDED_AT_ON_COMPLETED_RATE": MISSING_ENDED_AT_ON_COMPLETED_RATE,
+    "DRIVER_STATUS_CHANGE_RATE": DRIVER_STATUS_CHANGE_RATE,
+    "GDPR_ERASURE_RATE": GDPR_ERASURE_RATE,
+    "RATINGS_COMMENT_RATE": RATINGS_COMMENT_RATE,
+    "RATINGS_COMMENT_PII_RATE": RATINGS_COMMENT_PII_RATE,
+    "PAYMENT_PROVIDER_REF_RATE": PAYMENT_PROVIDER_REF_RATE,
+    "TEXT_FORMAT_NOISE_RATE": TEXT_FORMAT_NOISE_RATE,
+    "CATEGORY_VARIANT_RATE": CATEGORY_VARIANT_RATE,
+    "INVALID_CONTACT_RATE": INVALID_CONTACT_RATE,
+    "DUPLICATE_PASSENGER_RATE": DUPLICATE_PASSENGER_RATE,
+    "DUPLICATE_PAYMENT_RATE": DUPLICATE_PAYMENT_RATE,
+    "PAYMENT_PROVIDER_REF_PII_RATE": PAYMENT_PROVIDER_REF_PII_RATE,
+    "CANCEL_NOTE_PII_RATE": CANCEL_NOTE_PII_RATE,
+    "LONG_ACCEPTANCE_DELAY_RATE": LONG_ACCEPTANCE_DELAY_RATE,
+    "LONG_TRIP_DURATION_RATE": LONG_TRIP_DURATION_RATE,
+    "DISTANCE_OUTLIER_RATE": DISTANCE_OUTLIER_RATE,
+    "PAYMENT_TIMESTAMP_INCONSISTENCY_RATE": PAYMENT_TIMESTAMP_INCONSISTENCY_RATE,
+}
+
+
+def validate_configuration():
+    """Fail early instead of producing a silently unexpected distribution."""
+    invalid_rates = {name: value for name, value in DIRTY_DATA_RATES.items() if not 0.0 <= value <= 1.0}
+    if invalid_rates:
+        raise ValueError(f"Dirty-data rates must be between 0 and 1: {invalid_rates}")
+    counts = {
+        "N_TRIPS": N_TRIPS,
+        "N_PASSENGERS": N_PASSENGERS,
+        "N_DRIVERS": N_DRIVERS,
+        "N_NEW_DRIVERS_PER_RUN": N_NEW_DRIVERS_PER_RUN,
+        "N_DRIVER_UPDATES_PER_RUN": N_DRIVER_UPDATES_PER_RUN,
+        "N_NEW_PASSENGERS_PER_RUN": N_NEW_PASSENGERS_PER_RUN,
+        "N_PASSENGER_UPDATES_PER_RUN": N_PASSENGER_UPDATES_PER_RUN,
+        "N_GDPR_PASSENGER_ERASURES_PER_RUN": N_GDPR_PASSENGER_ERASURES_PER_RUN,
+        "N_GDPR_DRIVER_ERASURES_PER_RUN": N_GDPR_DRIVER_ERASURES_PER_RUN,
+        "N_GDPR_VEHICLE_ERASURES_PER_RUN": N_GDPR_VEHICLE_ERASURES_PER_RUN,
+    }
+    invalid_counts = {name: value for name, value in counts.items() if value < 0}
+    if invalid_counts:
+        raise ValueError(f"Generator counts cannot be negative: {invalid_counts}")
+    if not DB_CONFIG["password"]:
+        raise ValueError("DB_PASSWORD is required")
+    if RANDOM_SEED is not None:
+        seed = int(RANDOM_SEED)
+        random.seed(seed)
+        Faker.seed(seed)
+
 
 # ============================================================
 # Setup
@@ -119,6 +201,51 @@ logging.basicConfig(
 
 def maybe_null(value, rate=BROKEN_RATE):
     return None if random.random() < rate else value
+
+
+def noisy_text(value, *, allow_case=True):
+    """Add harmless formatting noise to source text fields."""
+    if value is None or random.random() >= TEXT_FORMAT_NOISE_RATE:
+        return value
+    result = str(value)
+    if allow_case:
+        result = random.choice([result.upper(), result.lower(), result.swapcase()])
+    return f"{' ' * random.randint(1, 3)}{result}{' ' * random.randint(1, 3)}"
+
+
+def noisy_email(value):
+    if value is None:
+        return None
+    if random.random() < INVALID_CONTACT_RATE:
+        return random.choice([
+            value.replace("@", " at "),
+            f"invalid-{uuid.uuid4().hex[:10]}",
+            value.split("@")[0] + "@",
+        ])
+    return noisy_text(value)
+
+
+def noisy_phone(value):
+    if value is None:
+        return None
+    if random.random() < INVALID_CONTACT_RATE:
+        return random.choice(["N/A", "000", "sin telefono", f"ext {random.randint(1, 99)}"])
+    return noisy_text(value, allow_case=False)
+
+
+def noisy_vehicle_type(value):
+    variants = {
+        "sedan": ["Sedan", " SEDAN ", "saloon"],
+        "hatchback": ["Hatchback", "HATCH BACK", " hatch back "],
+        "motorbike": ["MotorBike", "motorcycle", "moto", " bike "],
+    }
+    if random.random() < CATEGORY_VARIANT_RATE:
+        return random.choice(variants[value])
+    return value
+
+
+def accidental_contact():
+    return random.choice([fake.email(), fake.phone_number(), fake.name()])
 
 
 def get_connection():
@@ -273,7 +400,10 @@ def noisy_cancel_note():
     if random.random() < 0.2:
         base = base + " " + random.choice(["😅", "🚗", "❌", "🕒"])
 
-    return base
+    if random.random() < CANCEL_NOTE_PII_RATE:
+        base += " | contact: " + accidental_contact()
+
+    return noisy_text(base)
 
 
 def generate_coords():
@@ -319,6 +449,14 @@ def compute_times_for_status(status: str):
     ended_at = requested_at + end_lag
     canceled_at = None
 
+    if random.random() < LONG_ACCEPTANCE_DELAY_RATE:
+        accepted_at = requested_at + timedelta(minutes=random.randint(45, 360))
+        started_at = accepted_at + timedelta(minutes=random.randint(1, 20))
+        ended_at = started_at + timedelta(minutes=random.randint(5, 40))
+
+    if random.random() < LONG_TRIP_DURATION_RATE:
+        ended_at = started_at + timedelta(minutes=random.randint(210, 720))
+
     if random.random() < TIME_WEIRDNESS_RATE:
         if random.random() < 0.5:
             accepted_at = requested_at + timedelta(hours=random.randint(1, 72))
@@ -363,6 +501,9 @@ def compute_distances_for_status(status: str):
     raw_actual = round(estimated_distance + random.uniform(-2, 5), 2)
     raw_actual = None if raw_actual < 0 else raw_actual
 
+    if status == "completed" and random.random() < DISTANCE_OUTLIER_RATE:
+        raw_actual = round(estimated_distance + random.uniform(12, 60), 2)
+
     actual_distance = None
 
     if status == "completed":
@@ -394,6 +535,8 @@ def compute_distances_for_status(status: str):
 # ============================================================
 
 def fake_provider_ref():
+    if random.random() < PAYMENT_PROVIDER_REF_PII_RATE:
+        return "contact:" + accidental_contact()
     return f"gw_{uuid.uuid4().hex[:16]}"
 
 
@@ -412,7 +555,7 @@ def noisy_rating_comment():
     if random.random() < RATINGS_COMMENT_PII_RATE:
         base += " | contact: " + random.choice([fake.email(), fake.phone_number(), fake.name()])
 
-    return base
+    return noisy_text(base)
 
 
 # ============================================================
@@ -435,10 +578,10 @@ def seed_passengers(cur):
             RETURNING passenger_id
             """,
             (
-                fake.name(),
-                maybe_null(fake.email()),
-                maybe_null(fake.phone_number()),
-                fake.city(),
+                noisy_text(fake.name()),
+                maybe_null(noisy_email(fake.email())),
+                maybe_null(noisy_phone(fake.phone_number())),
+                noisy_text(fake.city()),
             ),
         )
 
@@ -482,7 +625,11 @@ def seed_drivers_and_vehicles(cur):
             ON CONFLICT (license_number) DO NOTHING
             RETURNING driver_id
             """,
-            (fake.name(), fake.bothify("LIC-#####"), random.choice(status_choices)),
+            (
+                noisy_text(fake.name()),
+                noisy_text(fake.bothify("LIC-#####")),
+                random.choice(status_choices),
+            ),
         )
         row = cur.fetchone()
         if not row:
@@ -507,8 +654,8 @@ def seed_drivers_and_vehicles(cur):
                 """,
                 (
                     driver_id,
-                    fake.license_plate(),
-                    random.choice(vehicle_type_choices),
+                    noisy_text(fake.license_plate()),
+                    noisy_vehicle_type(random.choice(vehicle_type_choices)),
                     random.choice(vehicle_status_choices),
                 ),
             )
@@ -562,11 +709,11 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
         if "full_name" in drivers_cols:
             d_cols.append("full_name")
-            d_vals.append(fake.name())
+            d_vals.append(noisy_text(fake.name()))
 
         if "license_number" in drivers_cols:
             d_cols.append("license_number")
-            d_vals.append(fake.bothify("LIC-#####"))
+            d_vals.append(noisy_text(fake.bothify("LIC-#####")))
 
         if "status" in drivers_cols:
             d_cols.append("status")
@@ -612,11 +759,11 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
 
         if "plate_number" in vehicles_cols:
             v_cols.append("plate_number")
-            v_vals.append(fake.license_plate())
+            v_vals.append(noisy_text(fake.license_plate()))
 
         if "vehicle_type" in vehicles_cols:
             v_cols.append("vehicle_type")
-            v_vals.append(random.choice(vehicle_type_choices))
+            v_vals.append(noisy_vehicle_type(random.choice(vehicle_type_choices)))
 
         if "status" in vehicles_cols:
             v_cols.append("status")
@@ -655,7 +802,7 @@ def insert_new_drivers_and_vehicles(cur, n_new: int):
                 # collision -> generate a new plate
                 if "plate_number" in v_cols:
                     idx = v_cols.index("plate_number")
-                    v_vals[idx] = fake.license_plate()
+                    v_vals[idx] = noisy_text(fake.license_plate())
 
             if not v_inserted:
                 raise RuntimeError("insert_new_drivers_and_vehicles: too many plate collisions")
@@ -710,7 +857,7 @@ def update_existing_drivers(cur, max_updates: int):
 
         if "full_name" in drivers_cols and random.random() < 0.05:
             sets.append("full_name = %s")
-            vals.append(fake.name())
+            vals.append(noisy_text(fake.name()))
 
         # Always bump updated_at if exists (trigger also does it; this is explicit)
         if "updated_at" in drivers_cols:
@@ -744,6 +891,19 @@ def insert_new_passengers(cur, n_new: int):
     new_ids = []
 
     has_email = "email" in passengers_cols
+    duplicate_profiles = []
+    if has_email:
+        cur.execute(
+            """
+            SELECT full_name, email, phone, city
+            FROM mobility.passengers
+            WHERE email IS NOT NULL
+              AND COALESCE(is_deleted, FALSE) = FALSE
+            ORDER BY random()
+            LIMIT 500
+            """
+        )
+        duplicate_profiles = cur.fetchall()
 
     attempts = 0
     max_attempts = max(n_new * 25, 200)
@@ -759,23 +919,34 @@ def insert_new_passengers(cur, n_new: int):
 
         cols = []
         vals = []
+        duplicate_profile = None
+        if duplicate_profiles and random.random() < DUPLICATE_PASSENGER_RATE:
+            duplicate_profile = random.choice(duplicate_profiles)
+        profile_name, profile_email, profile_phone, profile_city = (
+            duplicate_profile or (fake.name(), fake.email(), fake.phone_number(), fake.city())
+        )
 
         if "full_name" in passengers_cols:
             cols.append("full_name")
-            vals.append(fake.name())
+            vals.append(noisy_text(profile_name))
 
         if has_email:
-            email_val = None if random.random() < BROKEN_RATE else fake.email()
+            email_val = None if random.random() < BROKEN_RATE else noisy_email(profile_email)
+            if duplicate_profile and email_val:
+                # PostgreSQL's UNIQUE constraint is case/space sensitive. These
+                # variants therefore model duplicated identities without
+                # violating the operational schema.
+                email_val = f" {profile_email.swapcase()} "
             cols.append("email")
             vals.append(email_val)
 
         if "phone" in passengers_cols:
             cols.append("phone")
-            vals.append(maybe_null(fake.phone_number()))
+            vals.append(maybe_null(noisy_phone(profile_phone)))
 
         if "city" in passengers_cols:
             cols.append("city")
-            vals.append(fake.city())
+            vals.append(noisy_text(profile_city))
 
         if "created_at" in passengers_cols:
             cols.append("created_at")
@@ -848,15 +1019,15 @@ def update_existing_passengers(cur, max_updates: int):
 
         if "full_name" in passengers_cols and random.random() < 0.05:
             sets.append("full_name = %s")
-            vals.append(fake.name())
+            vals.append(noisy_text(fake.name()))
 
         if "phone" in passengers_cols and random.random() < 0.10:
             sets.append("phone = %s")
-            vals.append(maybe_null(fake.phone_number(), rate=0.15))
+            vals.append(maybe_null(noisy_phone(fake.phone_number()), rate=0.15))
 
         if "city" in passengers_cols and random.random() < 0.10:
             sets.append("city = %s")
-            vals.append(maybe_null(fake.city(), rate=0.15))
+            vals.append(maybe_null(noisy_text(fake.city()), rate=0.15))
 
         if "updated_at" in passengers_cols:
             sets.append("updated_at = now()")
@@ -1086,34 +1257,33 @@ def insert_payments(cur, trip_ids):
             provider_ref = None
             if has_provider_ref and random.random() < PAYMENT_PROVIDER_REF_RATE:
                 provider_ref = fake_provider_ref()
+            method = random.choice(["cash", "card", "wallet"])
+            status = random.choice(["paid", "failed", "pending"])
+            amount = round(random.uniform(5, 80), 2)
+            currency = "USD"
+            if random.random() < CATEGORY_VARIANT_RATE:
+                currency = random.choice(["usd", "Usd", "US$"])
 
+            paid_at = None
+            if status == "paid" and random.random() >= PAYMENT_TIMESTAMP_INCONSISTENCY_RATE:
+                paid_at = datetime.now()
+            elif status == "pending" and random.random() < PAYMENT_TIMESTAMP_INCONSISTENCY_RATE:
+                paid_at = datetime.now()
+
+            columns = ["trip_id", "method", "status", "amount", "currency", "paid_at"]
+            values = [trip_id, method, status, amount, currency, paid_at]
             if has_provider_ref:
-                cur.execute(
-                    """
-                    INSERT INTO mobility.payments (trip_id, method, status, amount, provider_ref)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (
-                        trip_id,
-                        random.choice(["cash", "card", "wallet"]),
-                        random.choice(["paid", "failed", "pending"]),
-                        round(random.uniform(5, 80), 2),
-                        provider_ref,
-                    ),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO mobility.payments (trip_id, method, status, amount)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (
-                        trip_id,
-                        random.choice(["cash", "card", "wallet"]),
-                        random.choice(["paid", "failed", "pending"]),
-                        round(random.uniform(5, 80), 2),
-                    ),
-                )
+                columns.append("provider_ref")
+                values.append(provider_ref)
+            placeholders = ",".join(["%s"] * len(columns))
+            insert_sql = f"INSERT INTO mobility.payments ({','.join(columns)}) VALUES ({placeholders})"
+            cur.execute(insert_sql, tuple(values))
+
+            # Gateway retries commonly create a second operational row with
+            # the same non-null provider reference. Silver identifies the
+            # canonical payment and Gold excludes the retry.
+            if provider_ref and random.random() < DUPLICATE_PAYMENT_RATE:
+                cur.execute(insert_sql, tuple(values))
 
 
 def insert_ratings(cur, trip_ids):
@@ -1259,7 +1429,9 @@ def update_trip_statuses(cur, max_updates=3000):
 # ============================================================
 
 def main():
+    validate_configuration()
     logging.info("Starting OLTP data generation (PLUS GDPR)")
+    logging.info("Intentional dirty-data profile: %s", DIRTY_DATA_RATES)
 
     conn = get_connection()
     cur = conn.cursor()

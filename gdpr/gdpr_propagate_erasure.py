@@ -1,883 +1,293 @@
+"""Propagate processed GDPR erasures through Bronze, Silver and Gold.
+
+The timestamp watermark is deliberately inclusive. A successful per-request
+audit marker supplies the second half of the compound watermark, so requests
+sharing the same ``processed_at`` value cannot be skipped.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import os
 import uuid
-import logging
 from datetime import datetime
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, lit, current_timestamp, max as spark_max,
-    coalesce as sp_coalesce, lower,
-    broadcast, sha2, concat_ws, array, expr
-)
 from delta.tables import DeltaTable
+from pyspark.sql import DataFrame
+from pyspark.sql.functions import col, coalesce, current_timestamp, lit, lower
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
-# ============================================================
-# Config
-# ============================================================
-ENV = os.getenv("ENV", "dev")
-JOB_NAME = os.getenv("JOB_NAME", "gdpr_propagate_erasure")
-
-# OLTP connection
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_NAME = os.getenv("DB_NAME", "mobility_oltp")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD")  # required at runtime
-JDBC_URL = f"jdbc:postgresql://{DB_HOST}:5432/{DB_NAME}"
-
-# Lake base paths (no new tables, same Delta structure)
-BRONZE_BASE = os.getenv("BRONZE_BASE", f"data/{ENV}/bronze")
-SILVER_BASE = os.getenv("SILVER_BASE", f"data/{ENV}/silver")
-
-# Default table paths (override if you want)
-BRONZE_PASSENGERS_PATH = os.getenv("BRONZE_PASSENGERS_PATH", f"{BRONZE_BASE}/passengers")
-BRONZE_DRIVERS_PATH    = os.getenv("BRONZE_DRIVERS_PATH",    f"{BRONZE_BASE}/drivers")
-BRONZE_VEHICLES_PATH   = os.getenv("BRONZE_VEHICLES_PATH",   f"{BRONZE_BASE}/vehicles")
-BRONZE_RATINGS_PATH    = os.getenv("BRONZE_RATINGS_PATH",    f"{BRONZE_BASE}/ratings")
-BRONZE_TRIPS_PATH      = os.getenv("BRONZE_TRIPS_PATH",      f"{BRONZE_BASE}/trips")
-BRONZE_PAYMENTS_PATH   = os.getenv("BRONZE_PAYMENTS_PATH",   f"{BRONZE_BASE}/payments")
-
-SILVER_PASSENGERS_PATH = os.getenv("SILVER_PASSENGERS_PATH", f"{SILVER_BASE}/passengers")
-SILVER_DRIVERS_PATH    = os.getenv("SILVER_DRIVERS_PATH",    f"{SILVER_BASE}/drivers")
-SILVER_VEHICLES_PATH   = os.getenv("SILVER_VEHICLES_PATH",   f"{SILVER_BASE}/vehicles")
-SILVER_RATINGS_PATH    = os.getenv("SILVER_RATINGS_PATH",    f"{SILVER_BASE}/ratings")
-SILVER_TRIPS_PATH      = os.getenv("SILVER_TRIPS_PATH",      f"{SILVER_BASE}/trips")
-SILVER_PAYMENTS_PATH   = os.getenv("SILVER_PAYMENTS_PATH",   f"{SILVER_BASE}/payments")
-
-# Gold layer (conformed)
-GOLD_BASE = os.getenv("GOLD_BASE", f"data/{ENV}/gold/_conformed")
-
-GOLD_HIST_PASSENGERS_PATH = os.getenv("GOLD_HIST_PASSENGERS_PATH", f"{GOLD_BASE}/hist/dim_passenger_hist")
-GOLD_HIST_DRIVERS_PATH    = os.getenv("GOLD_HIST_DRIVERS_PATH",    f"{GOLD_BASE}/hist/dim_driver_hist")
-GOLD_HIST_VEHICLES_PATH   = os.getenv("GOLD_HIST_VEHICLES_PATH",   f"{GOLD_BASE}/hist/dim_vehicle_hist")
-
-GOLD_SNAPSHOT_PASSENGERS_PATH = os.getenv("GOLD_SNAPSHOT_PASSENGERS_PATH", f"{GOLD_BASE}/snapshot/dim_passenger")
-GOLD_SNAPSHOT_DRIVERS_PATH    = os.getenv("GOLD_SNAPSHOT_DRIVERS_PATH",    f"{GOLD_BASE}/snapshot/dim_driver")
-GOLD_SNAPSHOT_VEHICLES_PATH   = os.getenv("GOLD_SNAPSHOT_VEHICLES_PATH",   f"{GOLD_BASE}/snapshot/dim_vehicle")
-
-GOLD_SCD3_PASSENGERS_PATH = os.getenv("GOLD_SCD3_PASSENGERS_PATH", f"{GOLD_BASE}/scd3/dim_passenger")
-GOLD_SCD3_DRIVERS_PATH    = os.getenv("GOLD_SCD3_DRIVERS_PATH",    f"{GOLD_BASE}/scd3/dim_driver")
-GOLD_SCD3_VEHICLES_PATH   = os.getenv("GOLD_SCD3_VEHICLES_PATH",   f"{GOLD_BASE}/scd3/dim_vehicle")
-
-# Control table for watermark
-CONTROL_BASE_PATH = os.getenv("CONTROL_BASE_PATH", f"data/{ENV}/_control")
-GDPR_CONTROL_PATH = os.getenv("GDPR_CONTROL_PATH", f"{CONTROL_BASE_PATH}/gdpr_control")
-
-# AUDIT (Delta) — en _control también
-AUDIT_ENABLED = os.getenv("AUDIT_ENABLED", "true").lower() == "true"
-GDPR_AUDIT_PATH = os.getenv("GDPR_AUDIT_PATH", f"{CONTROL_BASE_PATH}/gdpr_audit")
-
-# sal para que la huella no sea trivial (portfolio)
-GDPR_AUDIT_SALT = os.getenv("GDPR_AUDIT_SALT", f"{ENV}-salt")
-RUN_ID = os.getenv("RUN_ID", str(uuid.uuid4()))
-
-# Anon values
-ANON_NAME = os.getenv("ANON_NAME", "ANONYMIZED")
-ANON_PLATE_PREFIX = os.getenv("ANON_PLATE_PREFIX", "ANON-PLATE-")  # deterministic placeholder
+from src.common.config import Settings, env_bool
+from src.common.logging import log_event
+from src.common.spark import build_spark
 
 
-# ============================================================
-# Spark
-# ============================================================
-def build_spark(app_name: str) -> SparkSession:
-    spark = (
-        SparkSession.builder
-        .appName(app_name)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    # DEV tuning (same vibe as your ETLs)
-    spark.conf.set("spark.sql.shuffle.partitions", "4")
-    spark.conf.set("spark.default.parallelism", "4")
-    spark.conf.set("spark.sql.files.maxPartitionBytes", "64MB")
-    return spark
+JOB_NAME = "gdpr_propagate_erasure"
+EPOCH = datetime(1970, 1, 1)
+CONTROL_SCHEMA = "job_name string, last_processed_at timestamp, last_success_ts timestamp, last_status string"
+AUDIT_SCHEMA = """
+env string, run_id string, job_name string, request_id string,
+processed_at timestamp, applied_at timestamp, subject_type string,
+subject_id_hash string, layer string, table_name string, action string,
+columns_scrubbed array<string>, status string
+"""
 
 
-# ============================================================
-# GDPR control table helpers
-# ============================================================
-def ensure_gdpr_control_table(spark: SparkSession):
-    if DeltaTable.isDeltaTable(spark, GDPR_CONTROL_PATH):
+def _delta_exists(spark, path: str) -> bool:
+    # Do not mask storage/catalog exceptions: only a real false means absent.
+    return DeltaTable.isDeltaTable(spark, path)
+
+
+def _ensure_delta(spark, path: str, schema: str) -> None:
+    if not _delta_exists(spark, path):
+        spark.createDataFrame([], schema).write.format("delta").mode("errorifexists").save(path)
+
+
+def _watermark(spark, path: str) -> datetime:
+    if not _delta_exists(spark, path):
+        return EPOCH
+    rows = spark.read.format("delta").load(path).filter(col("job_name") == JOB_NAME).select("last_processed_at").take(1)
+    return rows[0][0] if rows and rows[0][0] else EPOCH
+
+
+def _record_control(spark, path: str, status: str, processed_at=None) -> None:
+    _ensure_delta(spark, path, CONTROL_SCHEMA)
+    success = status == "SUCCESS"
+    source = spark.createDataFrame(
+        [(JOB_NAME, processed_at, status)],
+        "job_name string, last_processed_at timestamp, last_status string",
+    ).withColumn("attempted_at", current_timestamp())
+    DeltaTable.forPath(spark, path).alias("t").merge(source.alias("s"), "t.job_name = s.job_name").whenMatchedUpdate(set={
+        "last_processed_at": "coalesce(s.last_processed_at, t.last_processed_at)",
+        "last_success_ts": "s.attempted_at" if success else "t.last_success_ts",
+        "last_status": "s.last_status",
+    }).whenNotMatchedInsert(values={
+        "job_name": "s.job_name", "last_processed_at": "s.last_processed_at",
+        "last_success_ts": "s.attempted_at" if success else "CAST(NULL AS TIMESTAMP)",
+        "last_status": "s.last_status",
+    }).execute()
+
+
+def _completed_request_ids(spark, audit_path: str) -> DataFrame:
+    _ensure_delta(spark, audit_path, AUDIT_SCHEMA)
+    return spark.read.format("delta").load(audit_path).filter(
+        (col("job_name") == JOB_NAME) & (col("action") == "complete") & (col("status") == "SUCCESS")
+    ).select(col("request_id").cast("long").alias("completed_request_id")).dropDuplicates()
+
+
+def _audit_rows(spark, audit_path: str, rows: list[tuple]) -> None:
+    if not rows:
         return
-
-    (
-        spark.createDataFrame(
-            [],
-            "job_name string, last_processed_at timestamp, last_success_ts timestamp, last_status string"
-        )
-        .write.format("delta")
-        .mode("overwrite")
-        .save(GDPR_CONTROL_PATH)
-    )
+    _ensure_delta(spark, audit_path, AUDIT_SCHEMA)
+    source = spark.createDataFrame(rows, AUDIT_SCHEMA)
+    target = DeltaTable.forPath(spark, audit_path)
+    target.alias("t").merge(source.alias("s"), """
+        t.request_id = s.request_id AND t.layer = s.layer
+        AND t.table_name = s.table_name AND t.action = s.action
+    """).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
 
 
-def read_last_processed_at(spark: SparkSession) -> datetime:
-    if not DeltaTable.isDeltaTable(spark, GDPR_CONTROL_PATH):
-        return datetime(1970, 1, 1)
-
-    df = (
-        spark.read.format("delta").load(GDPR_CONTROL_PATH)
-        .filter(col("job_name") == lit(JOB_NAME))
-    )
-
-    if df.rdd.isEmpty():
-        return datetime(1970, 1, 1)
-
-    ts = df.select("last_processed_at").first()[0]
-    return ts or datetime(1970, 1, 1)
+def _token_expression(secret_digest: str, key: str) -> str:
+    return f"concat('ERASED_', substring(sha2(concat('{secret_digest}', cast(t.{key} as string)), 256), 1, 24))"
 
 
-def upsert_gdpr_control(spark: SparkSession, last_processed_at, status: str):
-    """
-    Upsert in Delta:
-    - If last_processed_at is None (FAIL), DO NOT step on the previous watermark.
-    """
-    ensure_gdpr_control_table(spark)
-    target = DeltaTable.forPath(spark, GDPR_CONTROL_PATH)
-
-    updates = (
-        spark.createDataFrame(
-            [(JOB_NAME, last_processed_at, status)],
-            "job_name string, last_processed_at timestamp, last_status string"
-        )
-        .withColumn("last_success_ts", current_timestamp())
-    )
-
-    (
-        target.alias("t")
-        .merge(updates.alias("s"), "t.job_name = s.job_name")
-        .whenMatchedUpdate(set={
-            "last_processed_at": "coalesce(s.last_processed_at, t.last_processed_at)",
-            "last_success_ts": "s.last_success_ts",
-            "last_status": "s.last_status",
-        })
-        .whenNotMatchedInsert(values={
-            "job_name": "s.job_name",
-            "last_processed_at": "s.last_processed_at",
-            "last_success_ts": "s.last_success_ts",
-            "last_status": "s.last_status",
-        })
-        .execute()
-    )
+def _ids(spark, values: set[int], column: str) -> DataFrame:
+    return spark.createDataFrame([(value,) for value in sorted(values)], f"{column} long")
 
 
-# ============================================================
-# AUDIT helpers (Delta)
-# ============================================================
-def ensure_gdpr_audit_table(spark: SparkSession):
-    if not AUDIT_ENABLED:
-        return
-    if DeltaTable.isDeltaTable(spark, GDPR_AUDIT_PATH):
-        return
-
-    schema = """
-      env string,
-      run_id string,
-      job_name string,
-      request_id string,
-      processed_at timestamp,
-      applied_at timestamp,
-      subject_type string,
-      subject_id_hash string,
-      layer string,
-      table_name string,
-      action string,
-      columns_scrubbed array<string>,
-      status string
-    """
-
-    (
-        spark.createDataFrame([], schema)
-        .write.format("delta")
-        .mode("overwrite")
-        .save(GDPR_AUDIT_PATH)
-    )
+def _collect_ids(frame: DataFrame, column: str) -> set[int]:
+    if column not in frame.columns:
+        return set()
+    return {int(row[0]) for row in frame.select(column).where(col(column).isNotNull()).distinct().collect()}
 
 
-def subject_fingerprint(subject_type_col, subject_id_col):
-    # “huella digital”: hash irreversible del sujeto (no guardás el id real)
-    return sha2(
-        concat_ws("||",
-                  lit(GDPR_AUDIT_SALT),
-                  lower(subject_type_col.cast("string")),
-                  subject_id_col.cast("string")),
-        256
-    )
+def _matching_ids(spark, path: str, filter_column: str, values: set[int], result_column: str) -> set[int]:
+    if not values or not _delta_exists(spark, path):
+        return set()
+    frame = spark.read.format("delta").load(path)
+    if filter_column not in frame.columns or result_column not in frame.columns:
+        return set()
+    return _collect_ids(frame.filter(col(filter_column).isin(sorted(values))), result_column)
 
 
-def append_gdpr_audit(spark: SparkSession, df):
-    if not AUDIT_ENABLED:
-        return
-    ensure_gdpr_audit_table(spark)
-
-    # IMPORTANT: escribimos siempre el MISMO schema que la tabla
-    out = df.select(
-        col("env").cast("string"),
-        col("run_id").cast("string"),
-        col("job_name").cast("string"),
-        col("request_id").cast("string"),
-        col("processed_at").cast("timestamp"),
-        col("applied_at").cast("timestamp"),
-        col("subject_type").cast("string"),
-        col("subject_id_hash").cast("string"),
-        col("layer").cast("string"),
-        col("table_name").cast("string"),
-        col("action").cast("string"),
-        col("columns_scrubbed"),
-        col("status").cast("string"),
-    )
-
-    (
-        out.write
-        .format("delta")
-        .mode("append")
-        .save(GDPR_AUDIT_PATH)
-    )
+def _update(spark, path: str, key: str, values: set[int], assignments: dict[str, str], *, required=False) -> list[str]:
+    if not values:
+        return []
+    if not _delta_exists(spark, path):
+        if required:
+            raise RuntimeError(f"Required GDPR target is missing: {path}")
+        return []
+    columns = set(spark.read.format("delta").load(path).columns)
+    if key not in columns:
+        if required:
+            raise ValueError(f"Required GDPR key {key} is missing from {path}")
+        return []
+    selected = {name: expression for name, expression in assignments.items() if name in columns}
+    if not selected:
+        return []
+    source = _ids(spark, values, key)
+    DeltaTable.forPath(spark, path).alias("t").merge(source.alias("s"), f"t.{key} = s.{key}").whenMatchedUpdate(set=selected).execute()
+    return sorted(selected)
 
 
-def audit_log_action(
-    spark: SparkSession,
-    subjects_df,          # must contain: request_id, processed_at, subject_type, subject_id
-    layer: str,
-    table_name: str,
-    action: str,
-    columns_scrubbed_list,
-    status: str
-):
-    if not AUDIT_ENABLED:
-        return
+def _dimension_assignments(kind: str, secret: str, key: str) -> dict[str, str]:
+    token = _token_expression(secret, key)
+    if kind == "passenger":
+        values = {"full_name": token, "email": "CAST(NULL AS STRING)", "phone": "CAST(NULL AS STRING)", "city": "CAST(NULL AS STRING)"}
+    elif kind == "driver":
+        values = {"full_name": token, "license_number": token}
+    else:
+        values = {"plate_number": token}
+    values.update({f"prev_{name}": expression for name, expression in list(values.items())})
+    values.update({"is_deleted": "true", "deleted_at": "coalesce(t.deleted_at, current_timestamp())"})
+    flag_values = {
+        "missing_email": "true", "missing_phone": "true", "invalid_email_format": "false",
+        "invalid_phone_format": "false", "potential_duplicate_passenger": "false",
+        "canonical_passenger_id": f"t.{key}",
+        "missing_full_name": "false", "missing_license_number": "false", "missing_plate_number": "false",
+    }
+    values.update(flag_values)
+    return values
 
-    if subjects_df is None or subjects_df.rdd.isEmpty():
-        return
 
-    cols_arr = expr("array()") if not columns_scrubbed_list else array(*[lit(x) for x in columns_scrubbed_list])
+def _subject_paths(settings: Settings, kind: str) -> list[tuple[str, str, bool]]:
+    plural = {"passenger": "passengers", "driver": "drivers", "vehicle": "vehicles"}[kind]
+    return [
+        ("bronze", settings.path("bronze", plural), True),
+        ("silver", settings.path("silver", plural), True),
+        ("gold_hist", settings.path("gold", "_conformed", "hist", f"dim_{kind}_hist"), False),
+        ("gold_hist_legacy", settings.path("gold", "_conformed", "hist", f"dim_{kind}"), False),
+        ("gold_snapshot", settings.path("gold", "_conformed", "snapshot", f"dim_{kind}"), False),
+        ("gold_scd3", settings.path("gold", "_conformed", "scd3", f"dim_{kind}"), False),
+    ]
 
-    out = (
-        subjects_df
-        .select(
-            lit(ENV).alias("env"),
-            lit(RUN_ID).alias("run_id"),
-            lit(JOB_NAME).alias("job_name"),
-            col("request_id").cast("string").alias("request_id"),
-            col("processed_at").cast("timestamp").alias("processed_at"),
-            current_timestamp().alias("applied_at"),
-            lower(col("subject_type")).cast("string").alias("subject_type"),
-            subject_fingerprint(col("subject_type"), col("subject_id")).alias("subject_id_hash"),
-            lit(layer).alias("layer"),
-            lit(table_name).alias("table_name"),
-            lit(action).alias("action"),
-            cols_arr.alias("columns_scrubbed"),
-            lit(status).alias("status"),
-        )
-    )
 
-    # Si el audit falla, NO volteamos todo el GDPR (portfolio-friendly)
+def _process_request(spark, settings: Settings, row, secret: str, run_id: str, audit_path: str) -> tuple[set[str], tuple]:
+    kind = row.subject_type
+    subject_id = int(row.subject_id)
+    subject_ids = {subject_id}
+    touched: set[str] = set()
+    audit: list[tuple] = []
+    key = f"{kind}_id"
+    now = datetime.utcnow()
+    fingerprint = hashlib.sha256(f"{secret}:{kind}:{subject_id}".encode()).hexdigest()
+
+    vehicle_ids = subject_ids if kind == "vehicle" else set()
+    if kind == "driver":
+        for layer in ("bronze", "silver"):
+            vehicle_ids |= _matching_ids(spark, settings.path(layer, "vehicles"), "driver_id", subject_ids, "vehicle_id")
+
+    for layer, path, required in _subject_paths(settings, kind):
+        columns = _update(spark, path, key, subject_ids, _dimension_assignments(kind, secret, key), required=required)
+        if columns:
+            touched.add(path)
+            audit.append((settings.env, run_id, JOB_NAME, str(row.request_id), row.processed_at, now, kind, fingerprint, layer, path.rsplit("/", 1)[-1], "anonymize", columns, "SUCCESS"))
+
+    # A driver erasure also owns vehicle plates. Apply to every layer and history.
+    if vehicle_ids and kind == "driver":
+        for layer, path, required in _subject_paths(settings, "vehicle"):
+            columns = _update(spark, path, "vehicle_id", vehicle_ids, _dimension_assignments("vehicle", secret, "vehicle_id"), required=required)
+            if columns:
+                touched.add(path)
+                audit.append((settings.env, run_id, JOB_NAME, str(row.request_id), row.processed_at, now, kind, fingerprint, layer, path.rsplit("/", 1)[-1], "anonymize_derived_vehicle", columns, "SUCCESS"))
+
+    passenger_ids = subject_ids if kind == "passenger" else set()
+    driver_ids = subject_ids if kind == "driver" else set()
+    trip_ids: set[int] = set()
+    for layer in ("bronze", "silver"):
+        trips_path = settings.path(layer, "trips")
+        filters = [("passenger_id", passenger_ids), ("driver_id", driver_ids), ("vehicle_id", vehicle_ids)]
+        for filter_column, values in filters:
+            trip_ids |= _matching_ids(spark, trips_path, filter_column, values, "trip_id")
+            columns = _update(spark, trips_path, filter_column, values, {"cancel_note": "CAST(NULL AS STRING)"})
+            if columns:
+                touched.add(trips_path)
+        ratings_path = settings.path(layer, "ratings")
+        for filter_column, values in (("passenger_id", passenger_ids), ("driver_id", driver_ids)):
+            columns = _update(spark, ratings_path, filter_column, values, {"comment": "CAST(NULL AS STRING)"})
+            if columns:
+                touched.add(ratings_path)
+        payments_path = settings.path(layer, "payments")
+        columns = _update(spark, payments_path, "trip_id", trip_ids, {"provider_ref": "CAST(NULL AS STRING)"})
+        if columns:
+            touched.add(payments_path)
+
+    fact_trips = settings.path("gold", "_marts", "facts", "fact_trips")
+    for filter_column, values in (("passenger_id", passenger_ids), ("driver_id", driver_ids), ("vehicle_id", vehicle_ids)):
+        trip_ids |= _matching_ids(spark, fact_trips, filter_column, values, "trip_id")
+        columns = _update(spark, fact_trips, filter_column, values, {"cancel_note": "CAST(NULL AS STRING)"})
+        if columns:
+            touched.add(fact_trips)
+    fact_payments = settings.path("gold", "_marts", "facts", "fact_payments")
+    columns = _update(spark, fact_payments, "trip_id", trip_ids, {"provider_ref": "CAST(NULL AS STRING)"})
+    if columns:
+        touched.add(fact_payments)
+
+    _audit_rows(spark, audit_path, audit)
+    completion = (settings.env, run_id, JOB_NAME, str(row.request_id), row.processed_at, now, kind, fingerprint, "control", "gdpr_request", "complete", [], "SUCCESS")
+    return touched, completion
+
+
+def main() -> None:
+    settings = Settings.from_env(require_database=True)
+    secret = os.getenv("GDPR_HASH_KEY", "")
+    if len(secret) < 16:
+        raise ValueError("GDPR_HASH_KEY must be set to at least 16 characters; predictable defaults are forbidden")
+    secret_digest = hashlib.sha256(secret.encode()).hexdigest()
+    control_path = settings.path("_control", "gdpr_control")
+    audit_path = settings.path("_control", "gdpr_audit")
+    audit_enabled = env_bool("AUDIT_ENABLED", True)
+    if not audit_enabled:
+        raise ValueError("AUDIT_ENABLED=false is not allowed because completion markers protect the watermark")
+    run_id = str(uuid.uuid4())
+    vacuum_hours = int(os.getenv("GDPR_VACUUM_HOURS", "168"))
+    unsafe = env_bool("GDPR_UNSAFE_VACUUM", False)
+    if vacuum_hours < 168 and not (settings.env == "dev" and unsafe):
+        raise ValueError("GDPR_VACUUM_HOURS below 168 requires ENV=dev and GDPR_UNSAFE_VACUUM=1")
+    if unsafe:
+        os.environ.setdefault("DELTA_RETENTION_DURATION_CHECK_ENABLED", "false")
+    spark = build_spark(JOB_NAME)
+    touched: set[str] = set()
+    completion_rows: list[tuple] = []
     try:
-        append_gdpr_audit(spark, out)
-    except Exception as e:
-        logging.warning(f"AUDIT write failed (ignored): {type(e).__name__}: {e}")
-
-
-# ============================================================
-# Read OLTP GDPR requests (incremental)
-# ============================================================
-def read_processed_erasure_requests(spark: SparkSession, last_processed_at: datetime):
-    """
-    Reads processed erasure requests incrementally using processed_at watermark.
-    Source of truth: mobility.gdpr_requests (OLTP).
-    Supports:
-      - NEW: subject_type + subject_id
-      - LEGACY: passenger_id
-    """
-    if DB_PASSWORD is None:
-        raise ValueError("DB_PASSWORD env var is required")
-
-    last_ts_str = last_processed_at.strftime("%Y-%m-%d %H:%M:%S")
-
-    query = f"""
-      (SELECT
-          request_id,
-          passenger_id,
-          subject_type,
-          subject_id,
-          request_type,
-          status,
-          processed_at
-       FROM mobility.gdpr_requests
-       WHERE request_type = 'erasure'
-         AND status = 'processed'
-         AND processed_at IS NOT NULL
-         AND processed_at > TIMESTAMP '{last_ts_str}'
-      ) AS t
-    """
-
-    return (
-        spark.read.format("jdbc")
-        .option("url", JDBC_URL)
-        .option("dbtable", query)
-        .option("user", DB_USER)
-        .option("password", DB_PASSWORD)
-        .option("driver", "org.postgresql.Driver")
-        .load()
-    )
-
-
-def normalize_subjects(req_df):
-    """
-    Canonical (subject_type, subject_id) from new + legacy columns.
-    - if subject_type is NULL and passenger_id exists => passenger
-    - if subject_id is NULL and passenger_id exists => passenger_id
-    """
-    return (
-        req_df
-        .withColumn("subject_type_norm", lower(col("subject_type")))
-        .withColumn("subject_type_norm", sp_coalesce(col("subject_type_norm"), lit("passenger")))
-        .withColumn("subject_id_norm", sp_coalesce(col("subject_id"), col("passenger_id")))
-        .select(
-            col("request_id").cast("string").alias("request_id"),   # FIX: siempre string
-            col("processed_at").cast("timestamp").alias("processed_at"),
-            col("subject_type_norm").alias("subject_type"),
-            col("subject_id_norm").cast("long").alias("subject_id")
+        watermark = _watermark(spark, control_path)
+        completed = _completed_request_ids(spark, audit_path)
+        requests = (
+            spark.read.format("jdbc").option("url", settings.jdbc_url)
+            .option("dbtable", "mobility.gdpr_requests").option("user", settings.db_user)
+            .option("password", settings.db_password).option("driver", "org.postgresql.Driver").load()
+            .withColumn("subject_type", lower(coalesce(col("subject_type").cast("string"), lit("passenger"))))
+            .withColumn("subject_id", coalesce(col("subject_id"), col("passenger_id")).cast("long"))
+            .filter((col("status") == "processed") & (col("request_type") == "erasure") & col("processed_at").isNotNull())
+            .filter(col("processed_at") >= lit(watermark))
+            .join(completed, col("request_id") == col("completed_request_id"), "left_anti")
+            .select("request_id", "processed_at", "subject_type", "subject_id")
+            .orderBy("processed_at", "request_id")
         )
-        .filter(col("subject_id").isNotNull())
-    )
-
-
-# ============================================================
-# Delta update helpers (no subqueries)
-# ============================================================
-def _is_delta(spark: SparkSession, path: str) -> bool:
-    try:
-        return DeltaTable.isDeltaTable(spark, path)
-    except Exception:
-        return False
-
-
-def merge_update_by_ids(
-    spark: SparkSession,
-    table_path: str,
-    ids_df,
-    key_col: str,
-    set_map: dict,
-    match_condition: str = None,
-):
-    """
-    Delta UPDATE with ids using MERGE (Delta doesn't support subqueries in UPDATE conditions).
-    - Updates rows where t.key_col matches ids_df.key_col
-    - Optional extra match_condition (e.g., "t.comment IS NOT NULL")
-    """
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        return
-
-    ids = (
-        ids_df.select(col(key_col).cast("long").alias(key_col))
-        .where(col(key_col).isNotNull())
-        .distinct()
-    )
-
-    if ids.rdd.isEmpty():
-        logging.info(f"{table_path} | No ids to update ({key_col})")
-        return
-
-    target = DeltaTable.forPath(spark, table_path)
-    m = target.alias("t").merge(ids.alias("s"), f"t.{key_col} = s.{key_col}")
-
-    if match_condition:
-        m = m.whenMatchedUpdate(condition=match_condition, set=set_map)
-    else:
-        m = m.whenMatchedUpdate(set=set_map)
-
-    m.execute()
-
-
-# ============================================================
-# GDPR actions (return status + columns for audit)
-# ============================================================
-def anonymize_passengers_delta(spark: SparkSession, table_path: str, passenger_ids_df):
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        return "SKIP_NO_TABLE", []
-
-    cols = set(spark.read.format("delta").load(table_path).columns)
-    if "passenger_id" not in cols:
-        logging.warning(f"SKIP (no passenger_id column): {table_path}")
-        return "SKIP_NO_KEY", []
-
-    set_map = {}
-    if "full_name" in cols: set_map["full_name"] = f"'{ANON_NAME}'"
-    if "email" in cols:     set_map["email"] = "NULL"
-    if "phone" in cols:     set_map["phone"] = "NULL"
-    if "city" in cols:      set_map["city"] = "NULL"
-
-    if "is_deleted" in cols: set_map["is_deleted"] = "true"
-    if "deleted_at" in cols: set_map["deleted_at"] = "current_timestamp()"
-    if "updated_at" in cols: set_map["updated_at"] = "current_timestamp()"
-
-    if not set_map:
-        logging.warning(f"SKIP (no columns to anonymize): {table_path}")
-        return "SKIP_NO_COLUMNS", []
-
-    logging.info(f"{table_path} | GDPR passenger anonymize | set={list(set_map.keys())}")
-    merge_update_by_ids(spark, table_path, passenger_ids_df, "passenger_id", set_map)
-    return "APPLIED", list(set_map.keys())
-
-
-def anonymize_drivers_delta(spark: SparkSession, table_path: str, driver_ids_df):
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        return "SKIP_NO_TABLE", []
-
-    cols = set(spark.read.format("delta").load(table_path).columns)
-    if "driver_id" not in cols:
-        logging.warning(f"SKIP (no driver_id column): {table_path}")
-        return "SKIP_NO_KEY", []
-
-    set_map = {}
-    def set_for_variants(base_col: str, expr: str):
-        targets = [base_col, f"prev_{base_col}"]
-        for col_name in targets:
-            if col_name in cols:
-                set_map[col_name] = expr
-
-    set_for_variants("full_name", f"'{ANON_NAME}'")
-    set_for_variants("license_number", "CAST(NULL AS STRING)")
-    set_for_variants("status", "'inactive'")
-
-    if "is_deleted" in cols: set_map["is_deleted"] = "true"
-    if "deleted_at" in cols: set_map["deleted_at"] = "current_timestamp()"
-    if "updated_at" in cols: set_map["updated_at"] = "current_timestamp()"
-
-    if not set_map:
-        logging.warning(f"SKIP (no columns to anonymize): {table_path}")
-        return "SKIP_NO_COLUMNS", []
-
-    logging.info(f"{table_path} | GDPR driver anonymize | set={list(set_map.keys())}")
-    merge_update_by_ids(spark, table_path, driver_ids_df, "driver_id", set_map)
-    return "APPLIED", list(set_map.keys())
-
-
-def anonymize_vehicles_delta(spark: SparkSession, table_path: str, vehicle_ids_df):
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        return "SKIP_NO_TABLE", []
-
-    cols = set(spark.read.format("delta").load(table_path).columns)
-    if "vehicle_id" not in cols:
-        logging.warning(f"SKIP (no vehicle_id column): {table_path}")
-        return "SKIP_NO_KEY", []
-
-    set_map = {}
-    def set_plate_variant(col_name: str):
-        if col_name in cols:
-            set_map[col_name] = f"concat('{ANON_PLATE_PREFIX}', cast(s.vehicle_id as string))"
-
-    set_plate_variant("plate_number")
-    set_plate_variant("prev_plate_number")
-
-    if "is_deleted" in cols: set_map["is_deleted"] = "true"
-    if "deleted_at" in cols: set_map["deleted_at"] = "current_timestamp()"
-    if "updated_at" in cols: set_map["updated_at"] = "current_timestamp()"
-
-    if not set_map:
-        logging.warning(f"SKIP (no columns to anonymize): {table_path}")
-        return "SKIP_NO_COLUMNS", []
-
-    logging.info(f"{table_path} | GDPR vehicle anonymize | set={list(set_map.keys())}")
-    merge_update_by_ids(spark, table_path, vehicle_ids_df, "vehicle_id", set_map)
-    return "APPLIED", list(set_map.keys())
-
-
-def scrub_ratings_delta(spark: SparkSession, table_path: str, passenger_ids_df, driver_ids_df):
-    """
-    Scrub ratings.comment for passenger_id and driver_id (if present).
-    Returns dict statuses for audit.
-    """
-    statuses = {"passenger": "SKIP", "driver": "SKIP"}
-    cols_used = ["comment"]
-
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        statuses["passenger"] = "SKIP_NO_TABLE"
-        statuses["driver"] = "SKIP_NO_TABLE"
-        return statuses, cols_used
-
-    cols = set(spark.read.format("delta").load(table_path).columns)
-    if "comment" not in cols:
-        logging.warning(f"SKIP (no comment column): {table_path}")
-        statuses["passenger"] = "SKIP_NO_COLUMN"
-        statuses["driver"] = "SKIP_NO_COLUMN"
-        return statuses, cols_used
-
-    set_map = {"comment": "NULL"}
-    if "updated_at" in cols:
-        set_map["updated_at"] = "current_timestamp()"
-        cols_used.append("updated_at")
-
-    # passenger_id pass
-    if "passenger_id" in cols and not passenger_ids_df.rdd.isEmpty():
-        logging.info(f"{table_path} | GDPR scrub ratings.comment (passenger_id)")
-        merge_update_by_ids(
-            spark, table_path, passenger_ids_df, "passenger_id", set_map,
-            match_condition="t.comment IS NOT NULL"
-        )
-        statuses["passenger"] = "APPLIED"
-    else:
-        statuses["passenger"] = "SKIP_NO_IDS_OR_COL"
-
-    # driver_id pass
-    if "driver_id" in cols and not driver_ids_df.rdd.isEmpty():
-        logging.info(f"{table_path} | GDPR scrub ratings.comment (driver_id)")
-        merge_update_by_ids(
-            spark, table_path, driver_ids_df, "driver_id", set_map,
-            match_condition="t.comment IS NOT NULL"
-        )
-        statuses["driver"] = "APPLIED"
-    else:
-        statuses["driver"] = "SKIP_NO_IDS_OR_COL"
-
-    return statuses, cols_used
-
-
-def scrub_trips_delta(spark: SparkSession, table_path: str, passenger_ids_df, driver_ids_df, vehicle_ids_df):
-    """
-    Scrub trips.cancel_note for passenger_id / driver_id / vehicle_id.
-    Returns dict statuses for audit.
-    """
-    statuses = {"passenger": "SKIP", "driver": "SKIP", "vehicle": "SKIP"}
-    cols_used = ["cancel_note"]
-
-    if not _is_delta(spark, table_path):
-        logging.warning(f"SKIP (no Delta table): {table_path}")
-        statuses["passenger"] = "SKIP_NO_TABLE"
-        statuses["driver"] = "SKIP_NO_TABLE"
-        statuses["vehicle"] = "SKIP_NO_TABLE"
-        return statuses, cols_used
-
-    cols = set(spark.read.format("delta").load(table_path).columns)
-    if "cancel_note" not in cols:
-        logging.warning(f"SKIP (no cancel_note column): {table_path}")
-        statuses["passenger"] = "SKIP_NO_COLUMN"
-        statuses["driver"] = "SKIP_NO_COLUMN"
-        statuses["vehicle"] = "SKIP_NO_COLUMN"
-        return statuses, cols_used
-
-    set_map = {"cancel_note": "NULL"}
-    if "updated_at" in cols:
-        set_map["updated_at"] = "current_timestamp()"
-        cols_used.append("updated_at")
-
-    if "passenger_id" in cols and not passenger_ids_df.rdd.isEmpty():
-        logging.info(f"{table_path} | GDPR scrub trips.cancel_note (passenger_id)")
-        merge_update_by_ids(
-            spark, table_path, passenger_ids_df, "passenger_id", set_map,
-            match_condition="t.cancel_note IS NOT NULL"
-        )
-        statuses["passenger"] = "APPLIED"
-    else:
-        statuses["passenger"] = "SKIP_NO_IDS_OR_COL"
-
-    if "driver_id" in cols and not driver_ids_df.rdd.isEmpty():
-        logging.info(f"{table_path} | GDPR scrub trips.cancel_note (driver_id)")
-        merge_update_by_ids(
-            spark, table_path, driver_ids_df, "driver_id", set_map,
-            match_condition="t.cancel_note IS NOT NULL"
-        )
-        statuses["driver"] = "APPLIED"
-    else:
-        statuses["driver"] = "SKIP_NO_IDS_OR_COL"
-
-    if "vehicle_id" in cols and not vehicle_ids_df.rdd.isEmpty():
-        logging.info(f"{table_path} | GDPR scrub trips.cancel_note (vehicle_id)")
-        merge_update_by_ids(
-            spark, table_path, vehicle_ids_df, "vehicle_id", set_map,
-            match_condition="t.cancel_note IS NOT NULL"
-        )
-        statuses["vehicle"] = "APPLIED"
-    else:
-        statuses["vehicle"] = "SKIP_NO_IDS_OR_COL"
-
-    return statuses, cols_used
-
-
-def derive_trip_ids_from_trips(spark: SparkSession, trips_path: str, passenger_ids_df, driver_ids_df, vehicle_ids_df):
-    """
-    Compute affected trip_id set (UNION DISTINCT of matches per FK).
-    No SQL subqueries, no collect().
-    """
-    if not _is_delta(spark, trips_path):
-        logging.warning(f"SKIP (no Delta table): {trips_path}")
-        return None
-
-    trips_df = spark.read.format("delta").load(trips_path)
-    cols = set(trips_df.columns)
-    if "trip_id" not in cols:
-        logging.warning(f"SKIP (trips missing trip_id): {trips_path}")
-        return None
-
-    pieces = []
-
-    if "passenger_id" in cols and not passenger_ids_df.rdd.isEmpty():
-        p = broadcast(passenger_ids_df.select(col("passenger_id").cast("long").alias("passenger_id")).distinct())
-        pieces.append(
-            trips_df.select(col("trip_id").cast("long").alias("trip_id"), col("passenger_id").cast("long").alias("passenger_id"))
-                   .join(p, "passenger_id", "inner")
-                   .select("trip_id")
-        )
-
-    if "driver_id" in cols and not driver_ids_df.rdd.isEmpty():
-        d = broadcast(driver_ids_df.select(col("driver_id").cast("long").alias("driver_id")).distinct())
-        pieces.append(
-            trips_df.select(col("trip_id").cast("long").alias("trip_id"), col("driver_id").cast("long").alias("driver_id"))
-                   .join(d, "driver_id", "inner")
-                   .select("trip_id")
-        )
-
-    if "vehicle_id" in cols and not vehicle_ids_df.rdd.isEmpty():
-        v = broadcast(vehicle_ids_df.select(col("vehicle_id").cast("long").alias("vehicle_id")).distinct())
-        pieces.append(
-            trips_df.select(col("trip_id").cast("long").alias("trip_id"), col("vehicle_id").cast("long").alias("vehicle_id"))
-                   .join(v, "vehicle_id", "inner")
-                   .select("trip_id")
-        )
-
-    if not pieces:
-        return None
-
-    out = pieces[0]
-    for df in pieces[1:]:
-        out = out.unionByName(df)
-
-    return out.distinct()
-
-
-def scrub_payments_delta(
-    spark: SparkSession,
-    payments_path: str,
-    trips_path: str,
-    passenger_ids_df,
-    driver_ids_df,
-    vehicle_ids_df
-):
-    """
-    payments.provider_ref can identify someone via payment gateway.
-    We scrub provider_ref for payments whose trip_id belongs to affected trips.
-    Returns status + columns for audit.
-    """
-    if not _is_delta(spark, payments_path):
-        logging.warning(f"SKIP (no Delta table): {payments_path}")
-        return "SKIP_NO_TABLE", ["provider_ref"]
-
-    pay_cols = set(spark.read.format("delta").load(payments_path).columns)
-    if "provider_ref" not in pay_cols:
-        logging.warning(f"SKIP (no provider_ref column): {payments_path}")
-        return "SKIP_NO_COLUMN", ["provider_ref"]
-    if "trip_id" not in pay_cols:
-        logging.warning(f"SKIP (no trip_id column): {payments_path}")
-        return "SKIP_NO_TRIP_ID", ["provider_ref"]
-
-    trip_ids_df = derive_trip_ids_from_trips(
-        spark,
-        trips_path,
-        passenger_ids_df,
-        driver_ids_df,
-        vehicle_ids_df,
-    )
-
-    if trip_ids_df is None:
-        logging.warning(f"SKIP (could not derive trip ids): {trips_path}")
-        return "SKIP_NO_TRIPS", ["provider_ref"]
-
-    trip_ids_df = (
-        trip_ids_df
-        .filter(col("trip_id").isNotNull())
-        .distinct()
-    )
-    if trip_ids_df.rdd.isEmpty():
-        logging.info(f"{payments_path} | No trips matched GDPR subjects")
-        return "SKIP_NO_MATCHING_TRIPS", ["provider_ref"]
-
-    set_map = {"provider_ref": "NULL"}
-    cols_used = ["provider_ref"]
-    if "updated_at" in pay_cols:
-        set_map["updated_at"] = "current_timestamp()"
-        cols_used.append("updated_at")
-
-    logging.info(f"{payments_path} | GDPR scrub payments.provider_ref (via trips.trip_id)")
-    merge_update_by_ids(
-        spark,
-        payments_path,
-        trip_ids_df,
-        "trip_id",
-        set_map,
-        match_condition="t.provider_ref IS NOT NULL"
-    )
-    return "APPLIED", cols_used
-
-
-# ============================================================
-# Main
-# ============================================================
-def main():
-    spark = build_spark(f"{JOB_NAME}_{ENV}")
-
-    try:
-        last_processed_at = read_last_processed_at(spark)
-
-        logging.info("========================================")
-        logging.info("GDPR propagate erasure -> Lake (Bronze/Silver) [MERGE update] + AUDIT")
-        logging.info(f"ENV={ENV}")
-        logging.info(f"JOB_NAME={JOB_NAME}")
-        logging.info(f"RUN_ID={RUN_ID}")
-        logging.info(f"JDBC_URL={JDBC_URL}")
-        logging.info(f"GDPR_CONTROL_PATH={GDPR_CONTROL_PATH}")
-        logging.info(f"GDPR_AUDIT_PATH={GDPR_AUDIT_PATH} (enabled={AUDIT_ENABLED})")
-        logging.info(f"last_processed_at={last_processed_at}")
-        logging.info("========================================")
-
-        req_df = read_processed_erasure_requests(spark, last_processed_at)
-        if req_df.rdd.isEmpty():
-            logging.info("No new processed erasure requests to propagate")
-            upsert_gdpr_control(spark, last_processed_at, "SUCCESS (no-op)")
-            spark.stop()
-            return
-
-        subj_df = normalize_subjects(req_df).cache()
-
-        passenger_subjects_df = subj_df.filter(col("subject_type") == lit("passenger")).cache()
-        driver_subjects_df    = subj_df.filter(col("subject_type") == lit("driver")).cache()
-        vehicle_subjects_df   = subj_df.filter(col("subject_type") == lit("vehicle")).cache()
-
-        passenger_ids_df = passenger_subjects_df.select(col("subject_id").alias("passenger_id")).distinct()
-        driver_ids_df    = driver_subjects_df.select(col("subject_id").alias("driver_id")).distinct()
-        vehicle_ids_df   = vehicle_subjects_df.select(col("subject_id").alias("vehicle_id")).distinct()
-
-        n_p = passenger_ids_df.count()
-        n_d = driver_ids_df.count()
-        n_v = vehicle_ids_df.count()
-        logging.info(f"Subjects to anonymize: passengers={n_p}, drivers={n_d}, vehicles={n_v}")
-
-        # PASSENGERS
-        if n_p > 0:
-            st, cols_used = anonymize_passengers_delta(spark, BRONZE_PASSENGERS_PATH, passenger_ids_df)
-            audit_log_action(spark, passenger_subjects_df, "bronze", "passengers", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_passengers_delta(spark, SILVER_PASSENGERS_PATH, passenger_ids_df)
-            audit_log_action(spark, passenger_subjects_df, "silver", "passengers", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_passengers_delta(spark, GOLD_HIST_PASSENGERS_PATH, passenger_ids_df)
-            audit_log_action(spark, passenger_subjects_df, "gold_hist", "dim_passenger_hist", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_passengers_delta(spark, GOLD_SNAPSHOT_PASSENGERS_PATH, passenger_ids_df)
-            audit_log_action(spark, passenger_subjects_df, "gold_snapshot", "dim_passenger_snapshot", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_passengers_delta(spark, GOLD_SCD3_PASSENGERS_PATH, passenger_ids_df)
-            audit_log_action(spark, passenger_subjects_df, "gold_scd3", "dim_passenger_scd3", "anonymize", cols_used, st)
-
-        # DRIVERS
-        if n_d > 0:
-            st, cols_used = anonymize_drivers_delta(spark, BRONZE_DRIVERS_PATH, driver_ids_df)
-            audit_log_action(spark, driver_subjects_df, "bronze", "drivers", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_drivers_delta(spark, SILVER_DRIVERS_PATH, driver_ids_df)
-            audit_log_action(spark, driver_subjects_df, "silver", "drivers", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_drivers_delta(spark, GOLD_HIST_DRIVERS_PATH, driver_ids_df)
-            audit_log_action(spark, driver_subjects_df, "gold_hist", "dim_driver_hist", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_drivers_delta(spark, GOLD_SNAPSHOT_DRIVERS_PATH, driver_ids_df)
-            audit_log_action(spark, driver_subjects_df, "gold_snapshot", "dim_driver_snapshot", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_drivers_delta(spark, GOLD_SCD3_DRIVERS_PATH, driver_ids_df)
-            audit_log_action(spark, driver_subjects_df, "gold_scd3", "dim_driver_scd3", "anonymize", cols_used, st)
-
-        # VEHICLES
-        if n_v > 0:
-            st, cols_used = anonymize_vehicles_delta(spark, BRONZE_VEHICLES_PATH, vehicle_ids_df)
-            audit_log_action(spark, vehicle_subjects_df, "bronze", "vehicles", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_vehicles_delta(spark, SILVER_VEHICLES_PATH, vehicle_ids_df)
-            audit_log_action(spark, vehicle_subjects_df, "silver", "vehicles", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_vehicles_delta(spark, GOLD_HIST_VEHICLES_PATH, vehicle_ids_df)
-            audit_log_action(spark, vehicle_subjects_df, "gold_hist", "dim_vehicle_hist", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_vehicles_delta(spark, GOLD_SNAPSHOT_VEHICLES_PATH, vehicle_ids_df)
-            audit_log_action(spark, vehicle_subjects_df, "gold_snapshot", "dim_vehicle_snapshot", "anonymize", cols_used, st)
-
-            st, cols_used = anonymize_vehicles_delta(spark, GOLD_SCD3_VEHICLES_PATH, vehicle_ids_df)
-            audit_log_action(spark, vehicle_subjects_df, "gold_scd3", "dim_vehicle_scd3", "anonymize", cols_used, st)
-
-        # RATINGS.comment (passenger + driver)
-        if (n_p + n_d) > 0:
-            statuses, cols_used = scrub_ratings_delta(spark, BRONZE_RATINGS_PATH, passenger_ids_df, driver_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "bronze", "ratings", "scrub_comment", cols_used, statuses["passenger"])
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "bronze", "ratings", "scrub_comment", cols_used, statuses["driver"])
-
-            statuses, cols_used = scrub_ratings_delta(spark, SILVER_RATINGS_PATH, passenger_ids_df, driver_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "silver", "ratings", "scrub_comment", cols_used, statuses["passenger"])
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "silver", "ratings", "scrub_comment", cols_used, statuses["driver"])
-
-        # TRIPS.cancel_note (passenger + driver + vehicle)
-        if (n_p + n_d + n_v) > 0:
-            statuses, cols_used = scrub_trips_delta(spark, BRONZE_TRIPS_PATH, passenger_ids_df, driver_ids_df, vehicle_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "bronze", "trips", "scrub_cancel_note", cols_used, statuses["passenger"])
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "bronze", "trips", "scrub_cancel_note", cols_used, statuses["driver"])
-            if n_v > 0:
-                audit_log_action(spark, vehicle_subjects_df, "bronze", "trips", "scrub_cancel_note", cols_used, statuses["vehicle"])
-
-            statuses, cols_used = scrub_trips_delta(spark, SILVER_TRIPS_PATH, passenger_ids_df, driver_ids_df, vehicle_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "silver", "trips", "scrub_cancel_note", cols_used, statuses["passenger"])
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "silver", "trips", "scrub_cancel_note", cols_used, statuses["driver"])
-            if n_v > 0:
-                audit_log_action(spark, vehicle_subjects_df, "silver", "trips", "scrub_cancel_note", cols_used, statuses["vehicle"])
-
-        # PAYMENTS.provider_ref (via trips.trip_id)
-        if (n_p + n_d + n_v) > 0:
-            st, cols_used = scrub_payments_delta(spark, BRONZE_PAYMENTS_PATH, BRONZE_TRIPS_PATH, passenger_ids_df, driver_ids_df, vehicle_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "bronze", "payments", "scrub_provider_ref", cols_used, st)
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "bronze", "payments", "scrub_provider_ref", cols_used, st)
-            if n_v > 0:
-                audit_log_action(spark, vehicle_subjects_df, "bronze", "payments", "scrub_provider_ref", cols_used, st)
-
-            st, cols_used = scrub_payments_delta(spark, SILVER_PAYMENTS_PATH, SILVER_TRIPS_PATH, passenger_ids_df, driver_ids_df, vehicle_ids_df)
-            if n_p > 0:
-                audit_log_action(spark, passenger_subjects_df, "silver", "payments", "scrub_provider_ref", cols_used, st)
-            if n_d > 0:
-                audit_log_action(spark, driver_subjects_df, "silver", "payments", "scrub_provider_ref", cols_used, st)
-            if n_v > 0:
-                audit_log_action(spark, vehicle_subjects_df, "silver", "payments", "scrub_provider_ref", cols_used, st)
-
-        # Advance watermark
-        new_watermark = subj_df.select(spark_max("processed_at")).first()[0]
-        logging.info(f"New last_processed_at watermark: {new_watermark}")
-
-        upsert_gdpr_control(spark, new_watermark, f"SUCCESS (p={n_p}, d={n_d}, v={n_v})")
-        logging.info("GDPR propagation finished OK")
-        spark.stop()
-
-    except Exception as e:
-        logging.error(f"GDPR propagation failed: {type(e).__name__}: {e}")
+        rows = requests.collect()
+        for row in rows:
+            if row.subject_type not in {"passenger", "driver", "vehicle"} or row.subject_id is None:
+                raise ValueError(f"Unsupported or malformed GDPR request {row.request_id}")
+            request_touched, completion = _process_request(spark, settings, row, secret_digest, run_id, audit_path)
+            touched |= request_touched
+            completion_rows.append(completion)
+
+        for path in sorted(touched):
+            DeltaTable.forPath(spark, path).vacuum(vacuum_hours)
+        _audit_rows(spark, audit_path, completion_rows)
+        if rows:
+            _record_control(spark, control_path, "SUCCESS", max(row.processed_at for row in rows))
+        else:
+            _record_control(spark, control_path, "SUCCESS", watermark)
+        log_event(JOB_NAME, "propagate", "SUCCESS", row_count=len(rows), touched_tables=len(touched), vacuum_hours=vacuum_hours)
+    except Exception as exc:
         try:
-            upsert_gdpr_control(spark, None, f"FAIL: {type(e).__name__}")
-        except Exception:
-            pass
-        spark.stop()
+            _record_control(spark, control_path, f"FAIL:{type(exc).__name__}")
+        except Exception as control_exc:
+            log_event(JOB_NAME, "control", "FAIL", error=repr(control_exc))
+        log_event(JOB_NAME, "propagate", "FAIL", error=repr(exc))
         raise
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":

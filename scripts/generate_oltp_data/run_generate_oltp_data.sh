@@ -1,35 +1,16 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-echo "========================================"
-echo "Starting OLTP Data Generator"
-echo "========================================"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/scripts/run/_common.sh"
 
-# --------------------------------------------------
-# Environment variables
-# --------------------------------------------------
+# Defaults keep intentional dirty data enabled, while caller-provided values win.
+: "${N_TRIPS:=10000}"
+: "${N_PASSENGERS:=2000}"
+: "${N_DRIVERS:=500}"
+: "${BROKEN_RATE:=0.20}"
+: "${GDPR_ERASURE_RATE:=0.10}"
+export N_TRIPS N_PASSENGERS N_DRIVERS BROKEN_RATE GDPR_ERASURE_RATE
 
-export DB_HOST=localhost
-export DB_NAME=mobility_oltp
-export DB_USER=postgres
-
-# Volume control
-export N_TRIPS=10000
-export N_PASSENGERS=2000
-export N_DRIVERS=500
-
-# GDPR / RTBF simulation
-export GDPR_ERASURE_RATE=1.0
-export N_GDPR_ERASURES_PER_RUN=10
-export GDPR_ONLY_NON_DELETED=true
-export GDPR_NOTE="simulated_erasure"
-
-# --------------------------------------------------
-# Run generator
-# --------------------------------------------------
-
-python3 scripts/generate_oltp_data/generate_oltp_data.py
-
-echo "========================================"
-echo "OLTP Data Generator finished successfully"
-echo "========================================"
+run_python_job "scripts/generate_oltp_data/generate_oltp_data.py" "$@"
