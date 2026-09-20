@@ -233,6 +233,15 @@ def main():
             .withColumn("is_current", lit(True))
         )
 
+        # 4b) Collapse duplicate observations of the same rating (bronze
+        # re-observations within one batch) to the latest raw_loaded_at.
+        obs_window = Window.partitionBy("rating_id").orderBy(col("raw_loaded_at").desc())
+        scd_ready_df = (
+            scd_ready_df.withColumn("__rn", row_number().over(obs_window))
+            .filter(col("__rn") == 1)
+            .drop("__rn")
+        )
+
         # 5) First run: create Silver with rich schema
         if not silver_exists:
             (
@@ -247,7 +256,7 @@ def main():
             spark.stop()
             return
 
-        # 6) Merge incremental (SCD2)
+        # 6) Merge incremental (SCD2), keyed on the entity: rating_id
         AUTO_MERGE = os.getenv("DELTA_AUTO_MERGE", "0") == "1"
         if AUTO_MERGE:
             print("[CONFIG] Delta schema auto-merge: ENABLED")
@@ -261,7 +270,7 @@ def main():
             silver_table.alias("t")
             .merge(
                 scd_ready_df.alias("s"),
-                "t.trip_id = s.trip_id AND t.is_current = true"
+                "t.rating_id = s.rating_id AND t.is_current = true"
             )
             .whenMatchedUpdate(
                 condition="s.raw_loaded_at > t.raw_loaded_at AND s.scd_hash <> t.scd_hash",
@@ -278,7 +287,7 @@ def main():
             silver_table.alias("t")
             .merge(
                 scd_ready_df.alias("s"),
-                "t.trip_id = s.trip_id AND t.is_current = true"
+                "t.rating_id = s.rating_id AND t.is_current = true"
             )
             .whenNotMatchedInsert(values={
                 # Keys
