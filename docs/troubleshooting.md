@@ -223,3 +223,24 @@ No guardar contraseñas, tokens ni valores secretos en este archivo.
 - Archivos/configuración implicados: `infra/airflow/dags/urban_mobility_pipeline.py`, ocho `bash_command` que invocan wrappers de `scripts/run`.
 - Solución aplicada: agregar un espacio final a cada `bash_command` (`"...run_x.sh "`), truco documentado por Airflow para desactivar la resolución de plantilla; el espacio es inofensivo para bash.
 - Validación: corrida `manual__2026-09-18T21:55:14+00:00` completó `success` de Bronze a Gold (15 min, pool `spark_pool` de 1 slot), usando los wrappers del repo.
+
+### 2026-09-20 — SCD2 de ratings con merge clave en `trip_id` generaba filas `is_current` duplicadas
+
+- Estado: `RESUELTO`
+- Componente: `src/silver/ratings_bronze_to_silver.py`.
+- Síntoma: al publicar a la capa serving, PostgreSQL rechazó el PRIMARY KEY: `psycopg2.errors.UniqueViolation: could not create unique index "fact_ratings_pkey" ... Key (rating_id)=(3945) is duplicated`.
+- Evidencia: diagnóstico sobre `data/dev/silver/ratings` arrojó 4,566 `rating_id` con más de una fila vigente (`is_current=true`). OLTP fuente NO tiene duplicados (`ratings_pkey`, UNIQUE `trip_id`); el defecto era de Silver.
+- Causa confirmada: los dos `MERGE` SCD2 se emparejaban con `t.trip_id = s.trip_id AND t.is_current = true` en vez de la clave real de la entidad (`rating_id`). Al re-observarse un `trip_id` ya vigente, el `whenNotMatchedInsert` de la segunda operación insertaba una versión nueva sin cerrar la anterior, dejando dos corrientes para el mismo `rating_id`.
+- Archivos/configuración implicados: `src/silver/ratings_bronze_to_silver.py`, y aguas abajo `fact_ratings` y el publish serving.
+- Solución aplicada: se cambió la clave de los dos merges a `t.rating_id = s.rating_id AND t.is_current = true`, más un `row_number()` por `rating_id` (ordenado por `raw_loaded_at` desc) que colapsa re-observaciones del mismo batch antes del merge. Como los datos de `data/dev` quedaron inconsistentes, se reconstruyó el lake completo desde el OLTP actual con la ruta de rebootstrap (`mv data/dev` de respaldo + migraciones 000–003 + DAG 1 + DAG 2), que es la semántica determinística ya documentada.
+- Validación: tras el rebootstrap, `fact_ratings` publicó `5,194` filas coincidentes con el conteo OLTP y el PRIMARY KEY de `reporting.fact_ratings` se creó sin violaciones (`publish_state` ok). La corrida incremental posterior (`manual__2026-09-20T04:20:01+00:00`, `success`) sumó exactamente 1 trip + 1 rating nuevos sin duplicar: `reporting.fact_trips` 43,001 y `fact_ratings` 5,195.
+
+### 2026-09-20 — DAG 1 no reconstruía `fact_trips` y ordenaba mal dependencias Gold
+
+- Estado: `RESUELTO`
+- Componente: `infra/airflow/dags/urban_mobility_pipeline.py`.
+- Síntoma: tras el rebootstrap, `gold_marts.build_fact_trips` falló con `RuntimeError: Required Gold dimension not found: data/dev/gold/_conformed/static/dim_zone`; además, en versiones previas los agregados podían recomputar contra un `fact_trips` viejo porque el DAG nunca lo reconstruía.
+- Causa confirmada: el grupo Gold no declaraba aristas entre dims static/snapshot y `fact_trips`, y el DAG no incluía la task `build_fact_trips`; `fact_trips` valida claves contra `dim_zone`/snapshot dims que debían existir primero.
+- Archivos/configuración implicados: `infra/airflow/dags/urban_mobility_pipeline.py`, contrato de `src/common/gold_marts.py` (`_validated_key`).
+- Solución aplicada: DAG 1 cableado como medallion completo (7 Bronze → dims Silver → facts Silver → dims Gold static/snapshot→hist→scd3 → `fact_trips` → `fact_payments`/`fact_ratings`/aggregates → `publish_reporting`), con aristas explícitas `[dim_date, dim_zone, snap_*] >> fact_trips` y `fact_trips >> [fact_ratings, aggs]`.
+- Validación: bootstrap `manual__2026-09-20T02:43:47+00:00` y corrida incremental `manual__2026-09-20T04:20:01+00:00` completaron `success` de punta a punta; `publish_state` reportó 11/11 tablas publicadas y `reporting.fact_trips` = 43,001 = OLTP.

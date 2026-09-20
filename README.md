@@ -1,7 +1,8 @@
 # Urban Mobility Data Pipeline
 
 A local, cloud-shaped data engineering project: a medallion lakehouse
-(PostgreSQL OLTP → Bronze → Silver → Gold) built with **PySpark 3.5 +
+(PostgreSQL OLTP → Bronze → Silver → Gold) with an analytics serving layer
+(PostgreSQL `mobility_dw` → Power BI target), built with **PySpark 3.5 +
 Delta Lake 3.1**, orchestrated by **Airflow 2.10 (Celery) on Docker
 Compose inside WSL 2**, plus GDPR right-to-be-forgotten propagation and
 retention/vacuum housekeeping.
@@ -23,15 +24,24 @@ PostgreSQL (mobility_oltp)            WSL 2 / Docker Compose
       |  snapshot / hist / scd3 /     | spark-worker-1..2 :8082/3 |
       v   static dims + marts         | postgres (Airflow meta)   |
  Gold (Star-schema Delta)             | redis (Celery broker)     |
-                                      | oltp-db-proxy (bridge)    |
- GDPR erasure:  OLTP gdpr_requests --> propagation + VACUUM       |
- Retention:     Bronze/Silver deletes, Gold vacuum-only           |
-                                      +---------------------------+
+      |  publish: JDBC + atomic swap  | oltp-db-proxy (bridge)    |
+      v                               | postgres-analytics :5433  |
+ Analytics PostgreSQL (mobility_dw)   +---------------------------+
+   reporting / control schemas  ----> Power BI (serving layer)
+
+ GDPR erasure:  OLTP gdpr_requests --> propagation + VACUUM --> republish
+ Retention:     Bronze/Silver deletes, Gold vacuum-only cleanup
 ```
 
 All layers live on the local filesystem as Delta tables under
 `data/<ENV>/` (git-ignored). Lake metadata (watermarks, runs, GDPR audit)
 lives in `data/<ENV>/_control/`.
+
+The `publish_reporting` job copies the Gold star-schema into a **separate**
+analytics PostgreSQL (`mobility_dw`, service `postgres-analytics`) using
+full-refresh via staging + an atomic swap transaction, with its own
+`control.publish_state`/`publish_log`. That database is the intended serving
+layer for BI (Power BI) and is never the OLTP instance.
 
 ## DAGs
 
@@ -39,8 +49,8 @@ Defined in `infra/airflow/dags/`, planned in `infra/airflow/dags/DAGS.md`:
 
 | DAG | Purpose | Prod schedule |
 |---|---|---|
-| `urban_mobility_pipeline` | Bronze -> Silver -> Gold core run via `scripts/run` wrappers | daily |
-| `dag_gdpr_compliance` | Propagate OLTP erasure requests to every layer + targeted VACUUM | weekly |
+| `urban_mobility_pipeline` | Bronze -> Silver -> Gold core run via `scripts/run` wrappers, ending in `publish_reporting` | daily |
+| `dag_gdpr_compliance` | Propagate OLTP erasure requests to every layer + targeted VACUUM, then republish serving | weekly |
 | `dag_lakehouse_retention_vacuum` | Bronze/Silver aged-row deletion + Gold vacuum-only cleanup | monthly |
 | `dag_generate_mock_data` | Append a dirty synthetic OLTP batch (dev tool) | manual |
 
@@ -56,6 +66,7 @@ migrations/      versioned lake migrations (control, SCD2, contracts)
 src/             Bronze/Silver/Gold jobs; src/common/ = shared engine
 gdpr/            erasure propagation job
 retention/       Bronze/Silver/Gold cleanup entry points
+publishing/      Gold -> analytics PostgreSQL serving-layer publish job
 scripts/         generate_oltp_data/ + run/ wrappers (_common.sh resolver)
 infra/airflow/   Dockerfile, docker-compose.yaml, DAGs, Airflow ops README
 tests/           unit + integration pytest suites
@@ -69,8 +80,9 @@ CLI only), a PostgreSQL 14+ instance for the OLTP database.
 
 1. Clone and enter the repo.
 2. `cp infra/airflow/.env.example infra/airflow/.env` and fill it in.
-   `DB_PASSWORD` is required; `GDPR_HASH_KEY` must be a private secret of
-   at least 16 chars (`openssl rand -hex 32`). Never commit `.env`.
+   `DB_PASSWORD`, `ANALYTICS_DB_PASSWORD` (serving DB) and `GDPR_HASH_KEY` are
+   required; the GDPR key must be at least 16 chars (`openssl rand -hex 32`).
+   Never commit `.env`.
 3. Create the OLTP database:
    `psql -U postgres -f db/mobility_oltp.sql`
 4. Run lake migrations:
@@ -79,9 +91,13 @@ CLI only), a PostgreSQL 14+ instance for the OLTP database.
    `scripts/generate_oltp_data/run_generate_oltp_data.sh`
 6. Start the stack:
    `cd infra/airflow && docker compose --profile spark-cluster up -d --build`
+   This also starts `postgres-analytics` (`mobility_dw`, host port 5433) with
+   the `reporting`/`control`/`staging` schemas pre-created.
    UI at `http://localhost:8080` (default dev user `admin`/`admin` — change
    before any non-local exposure).
-7. Unpause and trigger `urban_mobility_pipeline`; monitor Bronze→Gold.
+7. Unpause and trigger `urban_mobility_pipeline`; monitor Bronze→Gold→publish.
+   Verify serving counts: `reporting.*` vs `control.publish_state` in
+   `postgres-analytics`.
 
 Host CLI runs need the same env as the containers; the wrappers accept
 both `OLTP_DB_*` (containers) and `DB_*` (host). Optional Spark tuning:
