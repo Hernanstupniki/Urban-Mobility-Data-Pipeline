@@ -25,6 +25,11 @@ x-airflow-common:
     OLTP_DB_USER: ${DB_USER:-postgres}
     OLTP_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
     GDPR_HASH_KEY: ${GDPR_HASH_KEY:?GDPR_HASH_KEY is required}
+    ANALYTICS_DB_HOST: ${ANALYTICS_DB_HOST:-postgres-analytics}
+    ANALYTICS_DB_PORT: ${ANALYTICS_DB_PORT:-5432}
+    ANALYTICS_DB_NAME: ${ANALYTICS_DB_NAME:-mobility_dw}
+    ANALYTICS_DB_USER: ${ANALYTICS_DB_USER:-analytics}
+    ANALYTICS_DB_PASSWORD: ${ANALYTICS_DB_PASSWORD:?ANALYTICS_DB_PASSWORD is required}
     AIRFLOW_DAG_MAX_ACTIVE_RUNS: ${AIRFLOW_DAG_MAX_ACTIVE_RUNS:-1}
     AIRFLOW_SPARK_POOL: ${AIRFLOW_SPARK_POOL:-spark_pool}
     AIRFLOW_SPARK_POOL_SLOTS: ${AIRFLOW_SPARK_POOL_SLOTS:-1}
@@ -49,6 +54,8 @@ x-airflow-common:
     &airflow-common-depends-on
     postgres:
       condition: service_healthy
+    postgres-analytics:
+      condition: service_healthy
     redis:
       condition: service_healthy
 
@@ -63,6 +70,24 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  postgres-analytics:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${ANALYTICS_DB_USER:-analytics}
+      POSTGRES_PASSWORD: ${ANALYTICS_DB_PASSWORD:?ANALYTICS_DB_PASSWORD is required}
+      POSTGRES_DB: ${ANALYTICS_DB_NAME:-mobility_dw}
+    ports:
+      - "${ANALYTICS_DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - analytics-db-volume:/var/lib/postgresql/data
+      - ./postgres/analytics-init.sql:/docker-entrypoint-initdb.d/10-analytics-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ANALYTICS_DB_USER:-analytics} -d ${ANALYTICS_DB_NAME:-mobility_dw}"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -263,3 +288,4 @@ services:
 
 volumes:
   postgres-db-volume:
+  analytics-db-volume:

@@ -90,3 +90,38 @@ class Settings:
 
     def path(self, *parts: str) -> str:
         return safe_child(self.env_root, *parts)
+
+
+@dataclass(frozen=True)
+class AnalyticsSettings:
+    """Serving-layer PostgreSQL (mobility_dw). Separate from the OLTP:
+    publishing must never be able to touch operational systems."""
+
+    host: str
+    port: int
+    db: str
+    user: str
+    password: str
+
+    @classmethod
+    def from_env(cls) -> "AnalyticsSettings":
+        try:
+            port = int(os.getenv("ANALYTICS_DB_PORT", "5432"))
+        except ValueError as exc:
+            raise ValueError("ANALYTICS_DB_PORT must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError("ANALYTICS_DB_PORT must be between 1 and 65535")
+        password = os.getenv("ANALYTICS_DB_PASSWORD")
+        if not password:
+            raise ValueError("ANALYTICS_DB_PASSWORD is required for publishing")
+        return cls(
+            host=os.getenv("ANALYTICS_DB_HOST", "localhost").strip(),
+            port=port,
+            db=os.getenv("ANALYTICS_DB_NAME", "mobility_dw").strip(),
+            user=os.getenv("ANALYTICS_DB_USER", "analytics").strip(),
+            password=password,
+        )
+
+    @property
+    def jdbc_url(self) -> str:
+        return f"jdbc:postgresql://{self.host}:{self.port}/{self.db}"
