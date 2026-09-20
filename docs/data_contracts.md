@@ -30,7 +30,7 @@ Trip quality flags are separate and non-null:
 
 `has_distance_in_invalid_status` remains as a compatibility summary of the two distance-state signals. Silver never invents a valid coordinate or distance to hide a bad observation.
 
-Passenger emails are normalized before duplicate comparison. `canonical_passenger_id` identifies the stable survivor and `potential_duplicate_passenger` preserves evidence instead of deleting a referenced OLTP identity. Payment rows sharing a non-null gateway reference receive the equivalent `canonical_payment_id`/`duplicate_provider_ref` treatment. Gold remaps trip passenger keys to the canonical passenger and excludes duplicate gateway retries from `fact_payments`.
+Passenger emails are normalized before duplicate comparison. `canonical_passenger_id` identifies the stable survivor and `potential_duplicate_passenger` preserves evidence instead of deleting a referenced OLTP identity. Payment rows sharing a non-null gateway reference receive the equivalent `canonical_payment_id`/`duplicate_provider_ref` treatment. Gold remaps trip passenger keys to the canonical passenger and excludes duplicate gateway retries from `fact_payments`. `fact_ratings` carries the typed grain (score, quality flags, validated `passenger_key`/`driver_key`/`trip_key`); comment free text stays in Silver and is never published to Gold.
 
 Known vehicle-type aliases (`saloon`, `hatch back`, `motorcycle`, `moto`, `bike`) and common USD spellings are canonicalized. Their normalization flags distinguish a repaired source value from one that arrived clean. Invalid or unknown categories remain flagged rather than guessed.
 

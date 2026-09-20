@@ -55,6 +55,12 @@ PAYMENT_COLUMNS = [
     "currency_was_normalized",
 ]
 
+RATING_COLUMNS = [
+    "rating_id", "trip_id", "passenger_id", "driver_id", "score", "created_at",
+    "updated_at", "raw_loaded_at", "score_invalid", "comment_missing",
+    "comment_contains_potential_pii",
+]
+
 
 def _require(frame: DataFrame, columns: list[str], source: str) -> None:
     missing = [name for name in columns if name not in frame.columns]
@@ -171,6 +177,60 @@ def build_fact_payments() -> None:
         fact = fact.join(dim, fact["payment_method_key"] == dim["__pmk"], "left").withColumn(
             "payment_method_key", when(col("__pmk").isNull(), lit(0)).otherwise(col("payment_method_key"))
         ).drop("__pmk")
+        row_count = _overwrite(fact, target_path)
+        log_event(job_name, "build", "SUCCESS", row_count=row_count, target=target_path)
+    finally:
+        spark.stop()
+
+
+def build_fact_ratings() -> None:
+    """Star-schema ratings fact.
+
+    Carries the typed rating grain (score + quality flags + validated keys)
+    and deliberately NOT the comment free text: that stays in Silver, where it
+    is redacted at source. A serving layer downstream should never republish
+    raw commentary.
+    """
+    settings = Settings.from_env()
+    job_name = "fact_ratings"
+    source_path = settings.path("silver", "ratings")
+    target_path = settings.path("gold", "_marts", "facts", "fact_ratings")
+    fact_trips_path = settings.path("gold", "_marts", "facts", "fact_trips")
+    spark = build_spark(job_name)
+    try:
+        if not DeltaTable.isDeltaTable(spark, source_path):
+            raise RuntimeError(f"Required Silver table not found: {source_path}")
+        source = spark.read.format("delta").load(source_path)
+        _require(source, RATING_COLUMNS + ["is_current"], source_path)
+        fact = source.filter(col("is_current") == lit(True)).select(*RATING_COLUMNS)
+        passenger_dimension = spark.read.format("delta").load(
+            settings.path("gold", "_conformed", "snapshot", "dim_passenger")
+        ).select(
+            col("passenger_id").cast("long").alias("__source_passenger_id"),
+            col("canonical_passenger_id").cast("long").alias("__canonical_passenger_id"),
+        )
+        fact = fact.join(
+            passenger_dimension,
+            fact["passenger_id"] == passenger_dimension["__source_passenger_id"],
+            "left",
+        )
+        fact = (
+            fact.withColumn(
+                "passenger_key",
+                coalesce(col("__canonical_passenger_id"), col("passenger_id"), lit(0)).cast("long"),
+            )
+            .withColumn("driver_key", coalesce(col("driver_id"), lit(0)).cast("long"))
+            .withColumn("trip_key", coalesce(col("trip_id"), lit(0)).cast("long"))
+            .withColumn(
+                "rating_date_key",
+                coalesce(date_format(to_date(coalesce(col("created_at"), col("raw_loaded_at"))), "yyyyMMdd").cast("int"), lit(0)),
+            )
+            .withColumn("dwh_loaded_at", current_timestamp())
+            .drop("__source_passenger_id", "__canonical_passenger_id")
+        )
+        fact = _validated_key(spark, fact, "passenger_key", settings.path("gold", "_conformed", "snapshot", "dim_passenger"), "passenger_id")
+        fact = _validated_key(spark, fact, "driver_key", settings.path("gold", "_conformed", "snapshot", "dim_driver"), "driver_id")
+        fact = _validated_key(spark, fact, "trip_key", fact_trips_path, "trip_id")
         row_count = _overwrite(fact, target_path)
         log_event(job_name, "build", "SUCCESS", row_count=row_count, target=target_path)
     finally:

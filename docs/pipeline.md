@@ -13,7 +13,7 @@ Run commands from any directory; each wrapper resolves the repository root.
 5. Run Silver dimensions first (especially vehicles), then trips, payments and ratings. Trips use the current vehicle dimension to validate the driver/vehicle pair.
 6. Build Gold static dimensions: date, payment method and zone.
 7. Build Gold snapshot, history and SCD3 dimensions.
-8. Build `fact_trips`, then `fact_payments`.
+8. Build `fact_trips`, then `fact_payments` and `fact_ratings` (`fact_ratings` validates `trip_key` against the freshly rebuilt `fact_trips`).
 9. Build daily aggregates.
 10. Run GDPR propagation after OLTP erasure requests and before publishing downstream extracts.
 11. Run Bronze and Silver retention on the agreed operational schedule.
