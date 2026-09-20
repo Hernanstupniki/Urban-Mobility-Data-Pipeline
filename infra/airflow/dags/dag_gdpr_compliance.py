@@ -89,4 +89,12 @@ with DAG(
             pool=SPARK_POOL,
         )
 
-    start >> audit_task >> gdpr_group >> end
+    # Republish the serving layer so erasures become visible to consumers
+    # without waiting for the next core pipeline run.
+    publish_task = BashOperator(
+        task_id="publish_reporting",
+        bash_command=f"bash {RUN_WRAPPERS}/publishing/run_publish_reporting.sh ",
+        pool=SPARK_POOL,
+    )
+
+    start >> audit_task >> gdpr_group >> publish_task >> end
