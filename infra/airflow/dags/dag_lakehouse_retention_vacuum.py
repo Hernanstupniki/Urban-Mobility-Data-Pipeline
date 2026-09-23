@@ -17,7 +17,9 @@ logs, but the spark_pool slot serializes them either way. Table names and
 target paths are validated inside the script to stay within DATA_ROOT/ENV.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+import pendulum
 
 import os
 
@@ -68,9 +70,8 @@ with DAG(
     dag_id="dag_lakehouse_retention_vacuum",
     default_args=default_args,
     description="Lakehouse housekeeping: Bronze/Silver retention cleanup + Delta VACUUM",
-    start_date=datetime(2026, 1, 1),
-    # Manual during development; '@monthly' in production (see DAGS.md).
-    schedule=None,
+    start_date=pendulum.datetime(2026, 1, 1, tz="America/Argentina/Buenos_Aires"),
+    schedule="0 5 1 * *",
     catchup=False,
     max_active_runs=DAG_MAX_ACTIVE_RUNS,
     tags=["retention", "maintenance", "lakehouse", "delta"],

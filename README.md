@@ -52,7 +52,6 @@ Defined in `infra/airflow/dags/`, planned in `infra/airflow/dags/DAGS.md`:
 | `urban_mobility_pipeline` | Bronze -> Silver -> Gold core run via `scripts/run` wrappers, ending in `publish_reporting` | daily |
 | `dag_gdpr_compliance` | Propagate OLTP erasure requests to every layer + targeted VACUUM, then republish serving | weekly |
 | `dag_lakehouse_retention_vacuum` | Bronze/Silver aged-row deletion + Gold vacuum-only cleanup | monthly |
-| `dag_generate_mock_data` | Append a dirty synthetic OLTP batch (dev tool) | manual |
 
 Every task shells out to a wrapper under `scripts/run/` — the single
 source of truth for job execution, identical from CLI and Airflow. Spark
@@ -83,6 +82,8 @@ CLI only), a PostgreSQL 14+ instance for the OLTP database.
 2. `cp infra/airflow/.env.example infra/airflow/.env` and fill it in.
    `DB_PASSWORD`, `ANALYTICS_DB_PASSWORD` (serving DB) and `GDPR_HASH_KEY` are
    required; the GDPR key must be at least 16 chars (`openssl rand -hex 32`).
+   Set unique Airflow database, admin, Fernet, and webserver secrets as listed
+   in the example file.
    Never commit `.env`.
 3. Create the OLTP database:
    `psql -U postgres -f db/mobility_oltp.sql`
@@ -94,9 +95,8 @@ CLI only), a PostgreSQL 14+ instance for the OLTP database.
    `cd infra/airflow && docker compose --profile spark-cluster up -d --build`
    This also starts `postgres-analytics` (`mobility_dw`, host port 5433) with
    the `reporting`/`control`/`staging` schemas pre-created.
-   UI at `http://localhost:8080` (default dev user `admin`/`admin` — change
-   before any non-local exposure).
-7. Unpause and trigger `urban_mobility_pipeline`; monitor Bronze→Gold→publish.
+   UI at `http://localhost:8080`; the admin password must be supplied in `.env`.
+7. Activate `urban_mobility_pipeline` and verify its next scheduled run; monitor Bronze→Gold→publish.
    Verify serving counts: `reporting.*` vs `control.publish_state` in
    `postgres-analytics`.
 
@@ -124,3 +124,7 @@ contracts and dirty-data handling.
   (consult before debugging; register new findings).
 - GDPR erasure survival: anonymized Silver/Gold values persist across
   pipeline reruns (verified end-to-end, see troubleshooting 2026-09-18).
+
+## Branches
+
+`develop` is the manual test environment. `main` is the production configuration with automatic schedules in `America/Argentina/Buenos_Aires`. Merging or checking out `main` in an active test Airflow installation can activate its schedules; use an isolated production deployment.

@@ -8,16 +8,21 @@ x-airflow-common:
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD is required}@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD is required}@postgres/airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
-    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY is required}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:?AIRFLOW_WEBSERVER_SECRET_KEY is required}
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: America/Argentina/Buenos_Aires
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: America/Argentina/Buenos_Aires
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD is required}
     AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-False}
     AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.session
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     AIRFLOW__CELERY__WORKER_CONCURRENCY: ${AIRFLOW_WORKER_CONCURRENCY:-2}
     _PIP_ADDITIONAL_REQUIREMENTS: ""
-    ENV: ${ENV:-dev}
+    ENV: prod
     PROJECT_DIR: /opt/project
     OLTP_DB_HOST: ${DB_HOST:-host.docker.internal}
     OLTP_DB_PORT: ${DB_PORT:-5432}
@@ -64,7 +69,7 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD is required}
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
@@ -120,7 +125,7 @@ services:
           --lastname User \
           --role Admin \
           --email admin@example.com \
-          --password admin
+          --password "$${AIRFLOW_ADMIN_PASSWORD}"
         airflow pools set "$${AIRFLOW_SPARK_POOL}" \
           "$${AIRFLOW_SPARK_POOL_SLOTS}" \
           "Spark execution pool"

@@ -14,7 +14,9 @@ tokenization secret. Rotating it makes previously erased values
 irreproducible, so treat it as a credential.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+import pendulum
 
 import os
 
@@ -65,9 +67,8 @@ with DAG(
     dag_id="dag_gdpr_compliance",
     default_args=default_args,
     description="GDPR erasure propagation across lakehouse layers + Delta VACUUM",
-    start_date=datetime(2026, 1, 1),
-    # Manual during development; '@weekly' in production (see DAGS.md).
-    schedule=None,
+    start_date=pendulum.datetime(2026, 1, 1, tz="America/Argentina/Buenos_Aires"),
+    schedule="0 23 * * 0",
     catchup=False,
     max_active_runs=DAG_MAX_ACTIVE_RUNS,
     tags=["gdpr", "compliance", "delta"],

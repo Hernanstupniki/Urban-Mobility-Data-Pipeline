@@ -16,7 +16,9 @@ dimensions, then fact_trips -> fact_payments/fact_ratings/aggregates, and
 finally publish_reporting to the analytics PostgreSQL serving layer.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+import pendulum
 
 import os
 
@@ -76,9 +78,8 @@ with DAG(
     dag_id="urban_mobility_pipeline",
     default_args=default_args,
     description="Medallion pipeline: OLTP -> Bronze -> Silver -> Gold",
-    start_date=datetime(2026, 1, 1),
-    # Manual during development; use '0 3 * * *' in production.
-    schedule=None,
+    start_date=pendulum.datetime(2026, 1, 1, tz="America/Argentina/Buenos_Aires"),
+    schedule="0 3 * * *",
     catchup=False,
     max_active_runs=DAG_MAX_ACTIVE_RUNS,
     tags=["mobility", "lakehouse", "pyspark", "delta", "azure-ready"],

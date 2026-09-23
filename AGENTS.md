@@ -10,7 +10,7 @@ Write repository documentation, explanatory comments, docstrings, and user-facin
 
 ## Branches
 
-`develop` is the test branch and keeps Airflow DAGs manual. `main` is the production branch and schedules the operational DAGs in `America/Asuncion`. Keep synthetic data generation manual and out of production execution. Do not switch the live development checkout to production code while Airflow is running from its bind mount.
+`develop` is the test branch and keeps Airflow DAGs manual. `main` is the production branch and schedules the operational DAGs in `America/Argentina/Buenos_Aires`. Keep synthetic data generation manual and out of production execution. Do not switch the live development checkout to production code while Airflow is running from its bind mount.
 
 ## Urban Mobility skills
 

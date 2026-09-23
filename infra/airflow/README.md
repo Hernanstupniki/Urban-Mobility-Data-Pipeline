@@ -28,7 +28,7 @@ Use `docker compose stop` to stop services without deleting data. Rebuild the im
 | `dag_lakehouse_retention_vacuum` | Bronze and Silver retention, then Gold vacuum | Manual |
 | `dag_generate_mock_data` | Append synthetic OLTP data for tests | Manual only |
 
-The production branch schedules the three operational DAGs in `America/Asuncion`. The synthetic generator remains manual. See `dags/DAGS.md` for the branch schedule. Airflow's `spark_pool` has one slot, and each DAG limits active runs to protect the local Spark cluster. A trailing space after each `.sh` BashOperator command prevents Airflow from treating the command as a Jinja template path.
+The production branch schedules the three operational DAGs in `America/Argentina/Buenos_Aires`. The synthetic generator remains manual. See `dags/DAGS.md` for the branch schedule. Airflow's `spark_pool` has one slot, and each DAG limits active runs to protect the local Spark cluster. A trailing space after each `.sh` BashOperator command prevents Airflow from treating the command as a Jinja template path.
 
 ## Configuration
 
@@ -50,3 +50,7 @@ docker compose exec airflow-scheduler airflow dags list
 Inspect task logs in Airflow or with `docker compose logs`. For a new failure, check `docs/troubleshooting.md` before changing the pipeline.
 
 The optional `urban-mobility-airflow.service` starts the distributed stack after Docker becomes available in WSL. Its source file is in this directory; installing or enabling it changes host startup behavior and is a separate operation.
+
+## Production branch
+
+`main` schedules the pipeline at 03:00 daily, GDPR erasure at 23:00 Sunday, and retention at 05:00 on the first day of each month in `America/Argentina/Buenos_Aires`. Populate `.env` with distinct production secrets before starting Compose. Generate a Fernet key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. The synthetic generator is excluded from this branch. New production DAGs start unpaused. DAGs already paused in an existing Airflow metadata database need to be unpaused once. Production deployment is a separate operation.
