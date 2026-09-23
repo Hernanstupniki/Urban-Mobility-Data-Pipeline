@@ -35,7 +35,7 @@ def main():
         # 1) Read Silver (FULL REBUILD ALWAYS)
         silver_df = spark.read.format("delta").load(SILVER_BASE_PATH)
 
-        # Safety cast (por si algún día viene como string)
+        # Cast safely if the source value is a string.
         if "is_current" in silver_df.columns:
             silver_df = silver_df.withColumn("is_current", col("is_current").cast("boolean"))
 
@@ -48,7 +48,7 @@ def main():
         if "zone_id" not in current_df.columns:
             raise ValueError("zone_id not found in silver/zones schema")
 
-        # desc_nulls_last() puede variar según versión; orden simple y listo
+        # Use a simple sort for compatibility across versions.
         w = Window.partitionBy("zone_id").orderBy(col("raw_loaded_at").desc())
         current_df = (
             current_df
@@ -89,7 +89,7 @@ def main():
             .withColumn("dwh_loaded_at", current_timestamp())
         )
 
-        # 5) Select final schema (limpio para conformed)
+        # 5) Select the final conformed schema.
         # (solo seleccionamos flags si existen)
         base_cols = [
             "zone_id",

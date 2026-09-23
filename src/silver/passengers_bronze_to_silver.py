@@ -106,7 +106,7 @@ def main():
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
     try:
-        # 1) Watermark (raw_loaded_at) desde Delta control table
+        # 1) Read the raw_loaded_at watermark from the Delta control table.
         last_ts = read_last_loaded_ts(spark)
         print(f"[{JOB_NAME}] last_loaded_ts(raw_loaded_at): {last_ts}")
 

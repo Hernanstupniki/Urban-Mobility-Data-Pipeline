@@ -1,0 +1,35 @@
+table dim_passenger
+	lineageTag: c6000000-0000-4000-8000-000000000009
+
+	column passenger_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		isKey: true
+		sourceColumn: passenger_id
+
+	column is_deleted
+		dataType: boolean
+		summarizeBy: none
+		displayFolder: Compliance
+		sourceColumn: is_deleted
+
+	column potential_duplicate_passenger
+		dataType: boolean
+		summarizeBy: none
+		displayFolder: "Data Quality"
+		sourceColumn: potential_duplicate_passenger
+
+
+	partition dim_passenger-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_dim_passenger = Source{[Schema="reporting", Item="dim_passenger"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_dim_passenger, {"passenger_id","is_deleted","potential_duplicate_passenger"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

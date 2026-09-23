@@ -67,7 +67,7 @@ SPECS = {
     "fact_trips": {
         "source": ("gold", "_marts", "facts", "fact_trips"),
         "pk": ["trip_id"],
-        "indexes": [["request_date_key"], ["driver_key"], ["passenger_key"], ["pickup_zone_key"], ["dropoff_zone_key"]],
+        "indexes": [["request_date_key"], ["driver_key"], ["passenger_key"], ["pickup_zone_key"], ["dropoff_zone_key"], ["driver_skey"], ["passenger_skey"], ["vehicle_skey"]],
     },
     "fact_payments": {
         "source": ("gold", "_marts", "facts", "fact_payments"),
@@ -77,7 +77,7 @@ SPECS = {
     "fact_ratings": {
         "source": ("gold", "_marts", "facts", "fact_ratings"),
         "pk": ["rating_id"],
-        "indexes": [["trip_key"], ["driver_key"], ["passenger_key"], ["rating_date_key"]],
+        "indexes": [["trip_key"], ["driver_key"], ["passenger_key"], ["rating_date_key"], ["driver_skey"], ["passenger_skey"]],
     },
     "agg_trips_daily": {
         "source": ("gold", "_marts", "aggregates", "agg_trips_daily"),

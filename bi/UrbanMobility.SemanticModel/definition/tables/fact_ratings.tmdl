@@ -1,0 +1,87 @@
+table fact_ratings
+	lineageTag: b3000000-0000-4000-8000-000000000003
+
+	column rating_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: rating_id
+
+	column trip_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: trip_id
+
+	column score
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: score
+
+	column score_invalid
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: score_invalid
+
+	column comment_missing
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: comment_missing
+
+	column comment_contains_potential_pii
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: comment_contains_potential_pii
+
+	column passenger_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: passenger_key
+
+	column driver_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: driver_key
+
+	column trip_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: trip_key
+
+	column rating_date_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: rating_date_key
+
+	column dwh_loaded_at
+		dataType: dateTime
+		isHidden
+		displayFolder: Metadata
+		sourceColumn: dwh_loaded_at
+
+	partition fact_ratings-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_fact_ratings = Source{[Schema="reporting", Item="fact_ratings"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_fact_ratings, {"rating_id","trip_id","score","score_invalid","comment_missing","comment_contains_potential_pii","passenger_key","driver_key","trip_key","rating_date_key","dwh_loaded_at"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

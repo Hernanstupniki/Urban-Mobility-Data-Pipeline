@@ -1,0 +1,24 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["fact_trips","fact_payments","fact_ratings","Trip","dim_date","Zone","Dropoff Zone","dim_payment_method","dim_driver","dim_passenger","dim_vehicle","_Measures"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table fact_trips
+ref table fact_payments
+ref table fact_ratings
+ref table Trip
+ref table dim_date
+ref table Zone
+ref table 'Dropoff Zone'
+ref table dim_payment_method
+ref table dim_driver
+ref table dim_passenger
+ref table dim_vehicle
+ref table _Measures

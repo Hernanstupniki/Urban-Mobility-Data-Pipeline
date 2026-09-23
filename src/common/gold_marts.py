@@ -4,6 +4,13 @@ Facts are rebuilt from the current Silver snapshot. This intentionally trades a
 small amount of local compute for deterministic schema backfills and guarantees
 that corrections moving a trip between dates or drivers cannot leave stale
 aggregate rows behind.
+
+Point-in-time correctness: every fact that references an SCD2 entity also
+carries ``*_skey`` surrogate keys resolved with a temporal lookup against the
+Gold ``hist`` projection of the Silver SCD2 table (see common.gold_dimensions).
+Old events keep the version that was valid when they happened; they are never
+silently repointed at the current version. The existing ``*_key`` columns stay
+as business/current-version keys for serving compatibility.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from pyspark.sql.functions import (
 )
 
 from src.common.config import Settings
+from src.common.gold_dimensions import SURROGATE_KEY_COLUMN
 from src.common.logging import log_event
 from src.common.spark import build_spark
 
@@ -84,6 +92,58 @@ def _validated_key(spark, fact: DataFrame, fact_column: str, dim_path: str, dim_
     return fact.join(dimension, fact[fact_column] == dimension[marker], "left").withColumn(
         fact_column, when(col(marker).isNull(), lit(0)).otherwise(col(fact_column))
     ).drop(marker)
+
+
+def _temporal_skeys(
+    spark,
+    fact: DataFrame,
+    hist_path: str,
+    business_key: str,
+    skey_name: str,
+    event_columns: list[str],
+) -> DataFrame:
+    """Resolve the SCD2 version valid at event time via temporal lookup.
+
+    Single implementation of the point-in-time rule for the whole Gold layer:
+    ``business_key = bk AND event_ts in [valid_from, coalesce(valid_to, +inf))``
+    against the hist projection of the Silver SCD2 table. Gold does not version
+    anything itself. Because Silver's valid_from is system/ingestion time and
+    the contracts guarantee nothing about pre-bootstrap state, events earlier
+    than the first known version resolve to the unknown member (skey 0) instead
+    of being retroactively attributed to an unknown-past version. Events after
+    the current version resolve normally (valid_to NULL means open/+inf).
+    """
+    if not DeltaTable.isDeltaTable(spark, hist_path):
+        raise RuntimeError(f"Required Gold history dimension not found: {hist_path}")
+    event_expr = coalesce(*[col(name) for name in event_columns])
+    history = (
+        spark.read.format("delta").load(hist_path)
+        .filter(col(SURROGATE_KEY_COLUMN) != lit(0))
+        .select(
+            col(business_key).cast("long").alias("__t_bk"),
+            col(SURROGATE_KEY_COLUMN).alias("__t_skey"),
+            col("valid_from").cast("timestamp").alias("__t_vf"),
+            coalesce(col("valid_to"), lit("9999-12-31 00:00:00").cast("timestamp")).cast("timestamp").alias("__t_vt"),
+        )
+    )
+    keyed = (
+        fact.withColumn("__t_event", event_expr)
+        .join(
+            history,
+            (col(business_key).cast("long") == col("__t_bk"))
+            & (col("__t_event") >= col("__t_vf"))
+            & (col("__t_event") < col("__t_vt")),
+            "left",
+        )
+        .groupBy(*[col(name) for name in fact.columns], col("__t_event"))
+        .agg(spark_max(col("__t_skey")).alias("__t_skey_matched"))
+        .withColumn(
+            skey_name,
+            coalesce(col("__t_skey_matched"), lit(0)).cast("long"),
+        )
+        .drop("__t_bk", "__t_skey_matched", "__t_event")
+    )
+    return keyed
 
 
 def build_fact_trips() -> None:
@@ -141,6 +201,16 @@ def build_fact_trips() -> None:
             ("dropoff_zone_key", ("static", "dim_zone"), "zone_id"),
         ]:
             fact = _validated_key(spark, fact, fact_col, settings.path("gold", "_conformed", *dim_parts), dim_col)
+        for skey, entity, bk in [
+            ("passenger_skey", "passenger", "passenger_id"),
+            ("driver_skey", "driver", "driver_id"),
+            ("vehicle_skey", "vehicle", "vehicle_id"),
+        ]:
+            fact = _temporal_skeys(
+                spark, fact,
+                settings.path("gold", "_conformed", "hist", f"dim_{entity}_hist"),
+                bk, skey, ["requested_at", "accepted_at", "created_at", "raw_loaded_at"],
+            )
         row_count = _overwrite(fact, target_path)
         log_event(job_name, "build", "SUCCESS", row_count=row_count, target=target_path)
     finally:
@@ -231,6 +301,15 @@ def build_fact_ratings() -> None:
         fact = _validated_key(spark, fact, "passenger_key", settings.path("gold", "_conformed", "snapshot", "dim_passenger"), "passenger_id")
         fact = _validated_key(spark, fact, "driver_key", settings.path("gold", "_conformed", "snapshot", "dim_driver"), "driver_id")
         fact = _validated_key(spark, fact, "trip_key", fact_trips_path, "trip_id")
+        for skey, entity, bk in [
+            ("passenger_skey", "passenger", "passenger_id"),
+            ("driver_skey", "driver", "driver_id"),
+        ]:
+            fact = _temporal_skeys(
+                spark, fact,
+                settings.path("gold", "_conformed", "hist", f"dim_{entity}_hist"),
+                bk, skey, ["created_at", "raw_loaded_at"],
+            )
         row_count = _overwrite(fact, target_path)
         log_event(job_name, "build", "SUCCESS", row_count=row_count, target=target_path)
     finally:

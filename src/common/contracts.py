@@ -30,14 +30,6 @@ DIMENSION_COLUMNS = {
     ],
 }
 
-# Only meaningful business attributes get a previous value in SCD3. Technical,
-# audit and quality columns deliberately do not receive prev_* copies.
-SCD3_PREVIOUS_COLUMNS = {
-    "passenger": ["full_name", "email", "phone", "city"],
-    "driver": ["full_name", "license_number", "status"],
-    "vehicle": ["driver_id", "plate_number", "vehicle_type", "make", "model", "year", "status"],
-}
-
 PII_COLUMNS = {
     "passenger": ["full_name", "email", "phone", "city"],
     "driver": ["full_name", "license_number"],

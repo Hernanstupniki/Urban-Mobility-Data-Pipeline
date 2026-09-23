@@ -1,0 +1,213 @@
+table fact_trips
+	lineageTag: a1000000-0000-4000-8000-000000000001
+
+	column trip_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: trip_id
+
+	column status
+		dataType: string
+		summarizeBy: none
+		sourceColumn: status
+
+	column requested_at
+		dataType: dateTime
+		isHidden
+		sourceColumn: requested_at
+
+	column started_at
+		dataType: dateTime
+		isHidden
+		sourceColumn: started_at
+
+	column started_hour
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		displayFolder: Derived
+		sourceColumn: started_hour
+
+	column started_local
+		dataType: dateTime
+		isHidden
+		displayFolder: Technical
+		sourceColumn: started_local
+
+	column request_local_date
+		dataType: dateTime
+		formatString: "yyyy-mm-dd"
+		summarizeBy: none
+		displayFolder: Derived
+		sourceColumn: request_local_date
+
+	column requested_local_hour
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		displayFolder: Derived
+		sourceColumn: requested_local_hour
+
+	column acceptance_delay_minutes
+		dataType: double
+		formatString: 0.0
+		summarizeBy: none
+		displayFolder: Timings
+		sourceColumn: acceptance_delay_minutes
+
+	column trip_duration_minutes
+		dataType: double
+		formatString: 0.0
+		summarizeBy: none
+		displayFolder: Timings
+		sourceColumn: trip_duration_minutes
+
+	column estimated_distance_km
+		dataType: double
+		formatString: 0.0
+		displayFolder: Distances
+		sourceColumn: estimated_distance_km
+
+	column actual_distance_km
+		dataType: double
+		formatString: 0.0
+		displayFolder: Distances
+		sourceColumn: actual_distance_km
+
+	column fare_amount
+		dataType: double
+		formatString: "#,##0.00"
+		displayFolder: Financials
+		sourceColumn: fare_amount
+
+	column fare_amount_analytical
+		dataType: double
+		formatString: "#,##0.00"
+		displayFolder: Financials
+		sourceColumn: fare_amount_analytical
+
+	column fare_amount_was_imputed
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: fare_amount_was_imputed
+
+	column cancel_reason
+		dataType: string
+		summarizeBy: none
+		displayFolder: Cancellations
+		sourceColumn: cancel_reason
+
+	column cancel_by
+		dataType: string
+		summarizeBy: none
+		displayFolder: Cancellations
+		sourceColumn: cancel_by
+
+	column is_distance_outlier
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: is_distance_outlier
+
+	column is_acceptance_delay_outlier
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: is_acceptance_delay_outlier
+
+	column is_trip_duration_outlier
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: is_trip_duration_outlier
+
+	column coordinates_missing
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: coordinates_missing
+
+	column completed_but_ended_at_null
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: completed_but_ended_at_null
+
+	column ended_before_started
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: ended_before_started
+
+	column driver_vehicle_mismatch
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: driver_vehicle_mismatch
+
+	column cancel_note_contains_potential_pii
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: cancel_note_contains_potential_pii
+
+	column passenger_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: passenger_key
+
+	column driver_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: driver_key
+
+	column vehicle_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: vehicle_key
+
+	column pickup_zone_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: pickup_zone_key
+
+	column dropoff_zone_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: dropoff_zone_key
+
+	column request_date_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: request_date_key
+
+	column dwh_loaded_at
+		dataType: dateTime
+		isHidden
+		displayFolder: Metadata
+		sourceColumn: dwh_loaded_at
+
+	partition fact_trips-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    // Keep raw UTC timestamps; render business time as fixed UTC-3.
+				    // Compute the four derived columns in PostgreSQL during import.
+				    Trips = Value.NativeQuery(Source, "SELECT trip_id, status, requested_at, started_at, acceptance_delay_minutes, trip_duration_minutes, estimated_distance_km, actual_distance_km, fare_amount, fare_amount_analytical, fare_amount_was_imputed, is_distance_outlier, is_acceptance_delay_outlier, is_trip_duration_outlier, coordinates_missing, completed_but_ended_at_null, ended_before_started, driver_vehicle_mismatch, cancel_note_contains_potential_pii, cancel_reason, cancel_by, passenger_key, driver_key, vehicle_key, pickup_zone_key, dropoff_zone_key, request_date_key, dwh_loaded_at, started_at - make_interval(hours => 3) AS started_local, extract(hour from started_at - make_interval(hours => 3))::bigint AS started_hour, (requested_at - make_interval(hours => 3))::date::timestamp AS request_local_date, extract(hour from requested_at - make_interval(hours => 3))::bigint AS requested_local_hour FROM reporting.fact_trips", null, [EnableFolding = true])
+				in
+				    Trips
+
+	annotation PBI_ResultType = Table

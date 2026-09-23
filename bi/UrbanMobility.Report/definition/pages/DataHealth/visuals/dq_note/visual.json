@@ -1,0 +1,51 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.2.0/schema.json",
+  "name": "dq_note",
+  "position": {
+    "x": 928,
+    "y": 450,
+    "z": 0,
+    "width": 324,
+    "height": 224
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "WHY QUALITY MATTERS",
+                    "textStyle": {
+                      "fontWeight": "bold",
+                      "fontSize": "12pt",
+                      "color": "#15253A"
+                    }
+                  },
+                  {
+                    "value": "\nClean fare-distance correlation: 0.948. Across all records: about 0.68. Quality flags make apparent relationships less reliable.",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#516276"
+                    }
+                  },
+                  {
+                    "value": "\nUnknown driver = unassigned trip, not a data error. Date trends follow UTC calendar.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#516276"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

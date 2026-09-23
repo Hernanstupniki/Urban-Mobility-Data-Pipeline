@@ -128,9 +128,6 @@ with DAG(
         hist_passenger = _spark_task("build_hist_dim_passenger", "gold/_conformed/hist/run_dim_passenger.sh")
         hist_driver = _spark_task("build_hist_dim_driver", "gold/_conformed/hist/run_dim_driver.sh")
         hist_vehicle = _spark_task("build_hist_dim_vehicle", "gold/_conformed/hist/run_dim_vehicle.sh")
-        scd3_passenger = _spark_task("build_scd3_dim_passenger", "gold/_conformed/scd3/run_dim_passenger.sh")
-        scd3_driver = _spark_task("build_scd3_dim_driver", "gold/_conformed/scd3/run_dim_driver.sh")
-        scd3_vehicle = _spark_task("build_scd3_dim_vehicle", "gold/_conformed/scd3/run_dim_vehicle.sh")
 
         fact_trips = _spark_task("build_fact_trips", "gold/_marts/facts/run_fact_trips.sh")
         fact_payments = _spark_task("build_fact_payments", "gold/_marts/facts/run_fact_payments.sh")
@@ -139,20 +136,19 @@ with DAG(
         agg_drivers = _spark_task("compute_driver_daily_kpis", "gold/_marts/aggregates/run_agg_driver_daily.sh")
 
         chain([snap_passenger, snap_driver, snap_vehicle],
-              [hist_passenger, hist_driver, hist_vehicle],
-              [scd3_passenger, scd3_driver, scd3_vehicle])
+              [hist_passenger, hist_driver, hist_vehicle])
         # fact_trips joins static/snapshot dims by contract (validated keys).
-        [dim_date, dim_zone, snap_passenger, snap_driver, snap_vehicle] >> fact_trips
+        [dim_date, dim_zone, snap_passenger, snap_driver, snap_vehicle,
+         hist_passenger, hist_driver, hist_vehicle] >> fact_trips
         fact_trips >> [fact_ratings, agg_trips, agg_drivers]
+        [hist_passenger, hist_driver] >> fact_ratings
         [dim_payment, fact_trips] >> fact_payments
         dim_date >> [agg_trips, agg_drivers]
         dim_zone >> fact_ratings
 
-    # ==========================================================================
     # SERVING LAYER: publish Gold marts to the analytics PostgreSQL database.
     # Only runs when the whole Gold layer succeeded; failure here does NOT
     # corrupt reporting (atomic swap) and never advances publishing state.
-    # ==========================================================================
 
     publish_task = BashOperator(
         task_id="publish_reporting",

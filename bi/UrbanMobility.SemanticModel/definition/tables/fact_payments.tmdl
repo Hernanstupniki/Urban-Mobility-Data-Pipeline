@@ -1,0 +1,76 @@
+table fact_payments
+	lineageTag: b2000000-0000-4000-8000-000000000002
+
+	column payment_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: payment_id
+
+	column trip_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: trip_id
+
+	column status
+		dataType: string
+		summarizeBy: none
+		sourceColumn: status
+
+	column amount
+		dataType: double
+		formatString: "#,##0.00"
+		displayFolder: Financials
+		sourceColumn: amount
+
+	column provider_ref_contains_potential_pii
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: provider_ref_contains_potential_pii
+
+	column duplicate_provider_ref
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: duplicate_provider_ref
+
+	column currency_was_normalized
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: currency_was_normalized
+
+	column payment_method_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: payment_method_key
+
+	column payment_date_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: payment_date_key
+
+	column dwh_loaded_at
+		dataType: dateTime
+		isHidden
+		displayFolder: Metadata
+		sourceColumn: dwh_loaded_at
+
+	partition fact_payments-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_fact_payments = Source{[Schema="reporting", Item="fact_payments"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_fact_payments, {"payment_id","trip_id","status","amount","provider_ref_contains_potential_pii","duplicate_provider_ref","currency_was_normalized","payment_method_key","payment_date_key","dwh_loaded_at"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

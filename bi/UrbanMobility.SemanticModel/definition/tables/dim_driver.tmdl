@@ -1,0 +1,34 @@
+table dim_driver
+	lineageTag: c5000000-0000-4000-8000-000000000008
+
+	column driver_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		isKey: true
+		sourceColumn: driver_id
+
+	column status
+		dataType: string
+		summarizeBy: none
+		sourceColumn: status
+
+	column is_deleted
+		dataType: boolean
+		summarizeBy: none
+		displayFolder: Compliance
+		sourceColumn: is_deleted
+
+
+	partition dim_driver-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_dim_driver = Source{[Schema="reporting", Item="dim_driver"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_dim_driver, {"driver_id","status","is_deleted"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

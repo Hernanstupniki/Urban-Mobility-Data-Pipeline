@@ -44,9 +44,10 @@ Every SCD2 table must have one current row per natural key, non-overlapping `[va
 
 Gold uses explicit projections rather than copying every Silver column.
 
-- Snapshot dimensions contain the current contractual attributes.
+- Snapshot dimensions contain the current contractual attributes plus the `surrogate_key` of the current version (same value `hist` assigns), so a consumer can join either the "today" view or the point-in-time history.
 - History dimensions mirror every Silver SCD2 version, including intermediate versions between Gold runs.
-- SCD3 contains only meaningful `prev_*` business attributes and derives them from the immediate predecessor in complete Silver history.
+- Silver is the only SCD2 writer (business key + `scd_hash` + `valid_from`/`valid_to`/`is_current`, close-then-insert MERGE, idempotent replay). Gold never recomputes versions: the `hist` dimensions are a verbatim projection of Silver SCD2 rows that adds only a deterministic `surrogate_key = hash(business_key, valid_from)` and an unknown member (key 0).
+- Facts resolve the version valid at event time through a temporal lookup (`event_ts in [valid_from, coalesce(valid_to, +inf))`) into `hist`, exposing `passenger_skey`, `driver_skey` and (where applicable) `vehicle_skey`. Because valid_from is system/ingestion time, events predating the first known version, unknown business keys and null events all resolve to the unknown member (skey 0) rather than being retroactively attributed; events after the current version resolve normally (open valid_to). The legacy SCD3 `prev_*` variant was retired: no fact, aggregate or serving consumer used it, and point-in-time analysis is served by hist + temporal lookups.
 - Facts omit accidental-PII fields (`cancel_note`, `provider_ref`) and contain validated conformed keys, using `0` for unknown dimension members.
 - Daily aggregates are rebuilt from the fact snapshot, so corrections that move a trip between a date or driver remove the old contribution and add the new one.
 

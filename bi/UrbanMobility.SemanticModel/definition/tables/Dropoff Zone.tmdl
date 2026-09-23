@@ -1,0 +1,37 @@
+table 'Dropoff Zone'
+	lineageTag: c3000000-0000-4000-8000-000000000006
+
+	column zone_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		isKey: true
+		sourceColumn: zone_id
+
+	column zone_name
+		dataType: string
+		summarizeBy: none
+		sourceColumn: zone_name
+
+	column city
+		dataType: string
+		summarizeBy: none
+		sourceColumn: city
+
+	column region
+		dataType: string
+		summarizeBy: none
+		sourceColumn: region
+
+	partition 'Dropoff Zone-01' = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_dim_zone = Source{[Schema="reporting", Item="dim_zone"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_dim_zone, {"zone_id","zone_name","city","region"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

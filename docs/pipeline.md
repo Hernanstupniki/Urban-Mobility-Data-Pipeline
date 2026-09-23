@@ -12,8 +12,8 @@ Run commands from any directory; each wrapper resolves the repository root.
 4. Run all Bronze jobs.
 5. Run Silver dimensions first (especially vehicles), then trips, payments and ratings. Trips use the current vehicle dimension to validate the driver/vehicle pair.
 6. Build Gold static dimensions: date, payment method and zone.
-7. Build Gold snapshot, history and SCD3 dimensions.
-8. Build `fact_trips`, then `fact_payments` and `fact_ratings` (`fact_ratings` validates `trip_key` against the freshly rebuilt `fact_trips`).
+7. Build Gold snapshot and history dimensions: `hist` is a verbatim projection of the Silver SCD2 rows plus a deterministic `surrogate_key`; `snapshot` is the current-version view.
+8. Build `fact_trips`, then `fact_payments` and `fact_ratings` (`fact_ratings` validates `trip_key` against the freshly rebuilt `fact_trips`). SCD2 facts resolve `*_skey` with a temporal lookup into `hist`, so each event points at the version valid when it happened.
 9. Build daily aggregates.
 10. Run GDPR propagation after OLTP erasure requests and before publishing downstream extracts.
 11. Publish Gold marts and dimensions to the analytics PostgreSQL serving layer (end of the core DAG and end of the GDPR DAG).

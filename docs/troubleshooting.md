@@ -1,246 +1,247 @@
-# Registro de errores y soluciones
+# Troubleshooting log
 
-Este documento conserva incidentes reales del proyecto. Debe consultarse antes de investigar un fallo y actualizarse cuando aparezca uno nuevo, incluso si todavía no tiene solución.
+Read this log before diagnosing a recurring failure. Record new reproducible incidents even when the cause is still unknown. Use `DETECTED` for an unconfirmed cause, `PENDING` for incomplete work or validation, and `RESOLVED` only after a verified fix. Keep dates, exact symptoms, evidence, affected files, and follow-up steps. Never record credentials or other secrets.
 
-Estados permitidos:
+## Incidents
 
-- `DETECTADO`: existe evidencia del error, pero la causa todavía no está confirmada.
-- `PENDIENTE`: la causa o corrección se conoce, pero falta completar la implementación o validación.
-- `RESUELTO`: la corrección fue aplicada y verificada.
+### 2026-09-16 — WSL restarted under Spark and Airflow load
 
-## Plantilla para incidentes nuevos
+- Status: `RESOLVED`.
+- Component: Airflow, Celery, PySpark, and WSL.
+- Symptom: WSL restarted while a DAG launched several Spark jobs.
+- Evidence: Celery allowed 16 concurrent tasks, multiple Spark sessions and JVMs ran at once, and local resource limits were too broad.
+- Cause: concurrent Spark processes exceeded the practical local resource budget.
+- Files: `infra/airflow/docker-compose.yaml`, `infra/airflow/dags/urban_mobility_pipeline.py`, `src/common/spark.py`, and `infra/wsl/urban-mobility-airflow.service`.
+- Fix: use one master, two workers with 1 core and 768 MB each, a 1 GB driver, one active DAG run, one `spark_pool` slot, Celery concurrency 2, and Docker limits. Keep `local[2]` only as a fallback.
+- Verified: local and distributed smoke tests passed; 11 tests passed.
 
-```text
-### YYYY-MM-DD — Título breve
+### 2026-09-16 — Spark worker UI advertised an internal IP
 
-- Estado: DETECTADO | PENDIENTE | RESUELTO
-- Componente:
-- Síntoma:
-- Evidencia:
-- Causa confirmada:
-- Archivos/configuración implicados:
-- Solución aplicada:
-- Validación:
-- Seguimiento pendiente:
-```
+- Status: `RESOLVED`.
+- Component: Spark worker UI.
+- Symptom: worker links pointed to an unreachable address such as `172.18.0.6:8081`.
+- Cause: Spark advertised its container IP.
+- Files: `infra/airflow/docker-compose.yaml`.
+- Fix: set `SPARK_PUBLIC_DNS=localhost` and publish separate host ports `8082` and `8083`.
+- Verified: both worker UIs returned HTTP 200 from localhost.
 
-No guardar contraseñas, tokens ni valores secretos en este archivo.
+### 2026-09-16 — Bronze JDBC attempted PostgreSQL on localhost
 
-## Incidentes
+- Status: `RESOLVED`.
+- Component: Bronze JDBC ingestion.
+- Symptom: `Connection to localhost:5432 refused` in the Bronze tasks.
+- Evidence: `Settings` read `DB_HOST`, but Compose supplied `OLTP_DB_HOST`.
+- Cause: application and container environment names differed.
+- Files: `src/common/config.py`, `infra/airflow/docker-compose.yaml`.
+- Fix: prefer `OLTP_DB_*` in Airflow and retain `DB_*` as a host CLI fallback.
+- Verified: Airflow connected to PostgreSQL and Bronze zones read through JDBC.
 
-### 2026-09-16 — Reinicio de WSL por presión de recursos Spark/Airflow
+### 2026-09-16 — `DB_HOST` conflicted with the Airflow entrypoint
 
-- Estado: `RESUELTO`
-- Componente: Airflow, Celery, PySpark y WSL.
-- Síntoma: WSL se reinició después de ejecutar el DAG con varios jobs Spark.
-- Evidencia: el stack permitía concurrencia Celery 16, tareas Spark paralelas y sesiones/JVM independientes sin límites locales suficientemente acotados.
-- Causa confirmada: combinación de múltiples procesos Spark concurrentes y límites de ejecución demasiado amplios para desarrollo local.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml`, `infra/airflow/dags/urban_mobility_pipeline.py`, `src/common/spark.py` y `infra/wsl/urban-mobility-airflow.service`.
-- Solución aplicada: cluster principal con un Master y dos Workers; 1 core y 768 MB Spark por worker; driver de 1 GB; `max_active_runs=1`; pool Airflow `spark_pool` de un slot; Celery concurrency 2; límites Docker; fallback `local[2]`; sin `local[*]`, aumento de swap ni cambios de `.wslconfig`.
-- Validación: smoke tests local y distribuido completados; suite de 11 pruebas aprobada.
+- Status: `RESOLVED`.
+- Component: Airflow worker and Redis.
+- Symptom: the worker exhausted 20 connection retries against `host.docker.internal:6379`, and the Spark driver disappeared.
+- Evidence: the container reported `DB_HOST=host.docker.internal`, `DB_PORT=6379`, and a refused Redis connection.
+- Cause: the Airflow image uses `DB_HOST` internally.
+- Files: `infra/airflow/docker-compose.yaml`, `src/common/config.py`.
+- Fix: remove generic `DB_*` variables from the common Airflow environment and use `OLTP_DB_*` for the application.
+- Verified: the worker stayed healthy with `RestartCount=0`, and a Spark job completed.
 
-### 2026-09-16 — UI de workers anunciada con IP interna
+### 2026-09-16 — Docker could not reach WSL PostgreSQL
 
-- Estado: `RESUELTO`
-- Componente: Spark Worker UI.
-- Síntoma: el enlace del worker apuntaba a una IP como `172.18.0.6:8081`, inaccesible desde Windows.
-- Causa confirmada: Spark publicaba la dirección interna del contenedor.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml`.
-- Solución aplicada: `SPARK_PUBLIC_DNS=localhost` y puertos separados `8082`/`8083` publicados en el host.
-- Validación: ambas UI respondieron HTTP 200 desde `localhost`.
+- Status: `RESOLVED`.
+- Component: PostgreSQL 14 and Docker networking.
+- Symptom: `host.docker.internal` first failed to resolve, then refused connections.
+- Evidence: PostgreSQL listened only on `127.0.0.1:5432`; the Compose bridge used `172.18.0.0/16` and gateway `172.18.0.1`.
+- Cause: native Docker in WSL lacked Docker Desktop's host mapping, and PostgreSQL did not listen on the bridge.
+- Files: `infra/airflow/docker-compose.yaml`, PostgreSQL `pg_hba.conf`, and its effective `listen_addresses`.
+- Fix: map `host.docker.internal` to the bridge gateway, listen only on localhost and `172.18.0.1`, and allow `mobility_oltp` from `172.18.0.0/16` with `scram-sha-256`. A `pg_hba.conf.pre-urban-mobility` backup was created.
+- Verified: Airflow and both Spark workers passed TCP checks; PostgreSQL authentication passed. If the bridge subnet changes, update the gateway, listener, and `pg_hba.conf` together.
 
-### 2026-09-16 — DAG fallaba conectando PostgreSQL en localhost
+### 2026-09-16 — OLTP password did not match PostgreSQL
 
-- Estado: `RESUELTO`
-- Componente: ingesta Bronze JDBC.
-- Síntoma: `Connection to localhost:5432 refused` en las cuatro tareas Bronze.
-- Evidencia: `Settings` leía `DB_HOST`, mientras Compose sólo proporcionaba inicialmente `OLTP_DB_HOST`.
-- Causa confirmada: nombres de variables inconsistentes entre el código y el contenedor.
-- Archivos/configuración implicados: `src/common/config.py` e `infra/airflow/docker-compose.yaml`.
-- Solución aplicada: `Settings` prioriza `OLTP_DB_HOST`, `OLTP_DB_PORT`, `OLTP_DB_NAME`, `OLTP_DB_USER` y `OLTP_DB_PASSWORD`, conservando `DB_*` como fallback para ejecución fuera de Airflow.
-- Validación: conexión TCP y autenticación PostgreSQL exitosas desde Airflow; Bronze zones alcanzó y leyó JDBC.
+- Status: `RESOLVED`.
+- Component: PostgreSQL and JDBC.
+- Symptom: `FATAL: password authentication failed for user "postgres"`.
+- Cause: the local PostgreSQL role and `DB_PASSWORD` in `infra/airflow/.env` differed.
+- Files: local PostgreSQL role and untracked `.env`.
+- Fix: synchronize the role with the configured secret without printing or committing it.
+- Verified: Airflow `psycopg2` authentication and Spark JDBC reads passed.
 
-### 2026-09-16 — Colisión de DB_HOST con el entrypoint de Airflow
+### 2026-09-16 — Shared Delta mount denied access
 
-- Estado: `RESUELTO`
-- Componente: Airflow worker y Redis.
-- Síntoma: el worker mostraba `Maximum number of retries (20) reached` e intentaba Redis en `host.docker.internal:6379`; el driver Spark desaparecía durante el job.
-- Evidencia: el log del contenedor mostró `DB_HOST=host.docker.internal`, `DB_PORT=6379` y conexión Redis rechazada.
-- Causa confirmada: `DB_HOST` es usada internamente por el entrypoint de la imagen Airflow y no puede reutilizarse para el OLTP.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml` y `src/common/config.py`.
-- Solución aplicada: eliminar `DB_HOST`/`DB_*` genéricas del entorno común de Airflow y usar exclusivamente `OLTP_DB_*` para la aplicación.
-- Validación: Airflow worker quedó `healthy`, con `RestartCount=0`, y un job Spark completó sin perder el driver.
+- Status: `RESOLVED`.
+- Component: Spark executors and `/opt/project/data`.
+- Symptom: `FileNotFoundException ... Permission denied` under `data/dev/_control/etl_control`.
+- Cause: Airflow used UID 1000 while Spark workers used UID 50000 on the same bind mount.
+- Files: `infra/airflow/docker-compose.yaml`, `infra/airflow/Dockerfile`.
+- Fix: run workers under `${AIRFLOW_UID}` and register `RUNTIME_UID` in the image.
+- Verified: both workers resolved UID 1000 with `getent passwd`; Bronze read and wrote Delta.
 
-### 2026-09-16 — PostgreSQL de WSL inaccesible desde Docker
+### 2026-09-16 — Spark executors could not resolve UID 1000
 
-- Estado: `RESUELTO`
-- Componente: PostgreSQL 14 local y red Docker.
-- Síntoma: `host.docker.internal` primero no resolvía y luego respondía `Connection refused`.
-- Evidencia: PostgreSQL escuchaba sólo en `127.0.0.1:5432`; la red `airflow_default` usa `172.18.0.0/16` con gateway `172.18.0.1`.
-- Causa confirmada: Docker Engine nativo en WSL no proveía el mismo mapeo que Docker Desktop, y PostgreSQL no escuchaba en el bridge privado.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml`, `/etc/postgresql/14/main/pg_hba.conf` y la configuración efectiva de PostgreSQL creada por `ALTER SYSTEM`.
-- Solución aplicada: mapear `host.docker.internal` a `${DOCKER_HOST_GATEWAY:-172.18.0.1}`; escuchar sólo en `localhost,172.18.0.1`; permitir `mobility_oltp` para el usuario `postgres` únicamente desde `172.18.0.0/16` con `scram-sha-256`. Se creó el respaldo `/etc/postgresql/14/main/pg_hba.conf.pre-urban-mobility`.
-- Validación: `AIRFLOW_DB_TCP_OK`, `WORKER1_DB_TCP_OK`, `WORKER2_DB_TCP_OK` y `POSTGRES_AUTH_OK`.
-- Nota: si cambia la subred Compose, actualizar juntos `DOCKER_HOST_GATEWAY`, `listen_addresses` y la regla `pg_hba`; no abrir PostgreSQL a `0.0.0.0` como atajo.
+- Status: `RESOLVED`.
+- Component: Hadoop UserGroupInformation.
+- Symptom: `KerberosAuthException` with `NullPointerException: invalid null input: name`.
+- Evidence: setting `SPARK_USER` helped the daemon but not the executor JVMs.
+- Cause: UID 1000 had no `/etc/passwd` entry inside the worker image.
+- Files: `infra/airflow/Dockerfile`, `infra/airflow/docker-compose.yaml`.
+- Fix: register `RUNTIME_UID` during the image build and retain `SPARK_USER=airflow` for the daemon.
+- Verified: executors started and processed distributed stages on both workers.
 
-### 2026-09-16 — Contraseña OLTP desalineada
+### 2026-09-16 — Spark worker could not create its work directory
 
-- Estado: `RESUELTO`
-- Componente: PostgreSQL/JDBC.
-- Síntoma: `FATAL: password authentication failed for user "postgres"`.
-- Causa confirmada: la contraseña del rol PostgreSQL local no coincidía con `DB_PASSWORD` en `infra/airflow/.env`.
-- Archivos/configuración implicados: `infra/airflow/.env` y el rol local `postgres`.
-- Solución aplicada: sincronizar el rol con el secreto ya configurado, sin imprimir ni versionar su valor.
-- Validación: autenticación `psycopg2` desde Airflow y lectura JDBC Spark exitosas.
+- Status: `RESOLVED`.
+- Component: Spark standalone worker.
+- Symptom: `AccessDeniedException` while creating `${SPARK_HOME}/work`.
+- Cause: the image-owned Spark directory was not writable by UID 1000.
+- Files: `infra/airflow/docker-compose.yaml`.
+- Fix: use `SPARK_WORKER_DIR=/tmp/spark-work` and pass `--work-dir` to the daemon.
+- Verified: both workers registered with the master and launched executors.
 
-### 2026-09-16 — Permiso denegado sobre Delta compartido
+### 2026-09-16 — Spark reported that a job accepted no resources
 
-- Estado: `RESUELTO`
-- Componente: ejecutores Spark y volumen `/opt/project/data`.
-- Síntoma: `FileNotFoundException ... Permission denied` bajo `data/dev/_control/etl_control`.
-- Causa confirmada: Airflow ejecutaba con UID 1000 y los workers Spark con UID 50000 sobre el mismo bind mount.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml` e `infra/airflow/Dockerfile`.
-- Solución aplicada: ejecutar los workers con `${AIRFLOW_UID}` y registrar ese UID como usuario válido dentro de la imagen mediante el build arg `RUNTIME_UID`.
-- Validación: ambos workers resolvieron `getent passwd 1000`; Bronze escribió/leyó Delta sin error de permisos.
+- Status: `RESOLVED`.
+- Component: Spark scheduler.
+- Symptom: `Initial job has not accepted any resources` despite two visible workers.
+- Evidence: the master repeatedly launched executors that exited with code 1.
+- Cause: the work directory and UID lookup errors killed the executors; the scheduler message was secondary.
+- Fix: correct `SPARK_WORKER_DIR` and register `RUNTIME_UID` without increasing cores or memory.
+- Verified: Bronze zones completed with `exit 0` and `status=NO_DATA` on two executors.
 
-### 2026-09-16 — Daemon y executors Spark no resolvían UID 1000
+### 2026-09-16 — Gold DAG referenced a missing file
 
-- Estado: `RESUELTO`
-- Componente: Hadoop UserGroupInformation.
-- Síntoma: `KerberosAuthException` causado por `NullPointerException: invalid null input: name`.
-- Evidencia: el daemon arrancó con `SPARK_USER`, pero los JVM executors siguieron fallando porque UID 1000 no existía en `/etc/passwd`.
-- Causa confirmada: `SPARK_USER` no sustituye el lookup Unix realizado dentro de cada executor.
-- Archivos/configuración implicados: `infra/airflow/Dockerfile` e `infra/airflow/docker-compose.yaml`.
-- Solución aplicada: registrar `RUNTIME_UID` en `/etc/passwd` durante el build. `SPARK_USER=airflow` se mantiene para el daemon.
-- Validación: executors iniciaron y procesaron stages distribuidos en ambos workers.
+- Status: `RESOLVED`.
+- Component: `urban_mobility_pipeline` DAG.
+- Symptom: a task referenced the absent `src/gold/driver_payouts.py`.
+- Files: `infra/airflow/dags/urban_mobility_pipeline.py`.
+- Fix: call the existing `run_agg_driver_daily.sh` wrapper as `compute_driver_daily_kpis`.
+- Verified: Python compiled, Airflow loaded both Gold tasks, and `airflow dags list-import-errors` was empty.
 
-### 2026-09-16 — Worker Spark no podía crear su directorio de trabajo
+### 2026-09-16 — Corrected DAG needed a full run
 
-- Estado: `RESUELTO`
-- Componente: Spark standalone Worker.
-- Síntoma: `AccessDeniedException` al crear `${SPARK_HOME}/work`.
-- Causa confirmada: `${SPARK_HOME}` pertenece a la imagen y no es escribible por UID 1000.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml`.
-- Solución aplicada: configurar `SPARK_WORKER_DIR=/tmp/spark-work` y pasar `--work-dir` al daemon.
-- Validación: los dos workers se registraron correctamente en el Master y lanzaron executors.
+- Status: `PENDING`.
+- Component: run `manual__2026-09-16T06:14:39+00:00`.
+- Symptom: the run started while the scheduler still held the old serialized graph.
+- Evidence: after scheduler, webserver, and triggerer recreation, Airflow listed `gold_marts.compute_driver_daily_kpis`; compile, 11 tests, import checks, and distributed Bronze zones passed.
+- Follow-up: confirm whether that run completed or start a new run if it retained the old graph, then verify every task.
 
-### 2026-09-16 — Mensaje engañoso “job has not accepted any resources”
+### 2026-09-16 — Interrupted Compose recreation left temporary names
 
-- Estado: `RESUELTO`
-- Componente: Spark scheduler.
-- Síntoma: `Initial job has not accepted any resources` aun con dos workers visibles.
-- Evidencia: el Master lanzaba executors repetidamente y éstos terminaban con código 1.
-- Causa confirmada: el mensaje era consecuencia, no causa; primero falló el work dir y luego el lookup del UID de los executors.
-- Solución aplicada: corregir `SPARK_WORKER_DIR` y registrar `RUNTIME_UID`; no aumentar cores ni memoria.
-- Validación: Bronze zones completó con `exit 0` y `status=NO_DATA` usando dos executors.
+- Status: `RESOLVED`.
+- Component: Docker Compose.
+- Symptom: container-name conflict during `--force-recreate` after the command timed out.
+- Cause: Compose was interrupted during its rename and recreate sequence.
+- Fix: let reconciliation finish, then run `docker compose ... up -d --no-build`. Volumes and data were kept.
+- Verified: Airflow services and the Spark master were healthy, and both workers registered.
 
-### 2026-09-16 — Referencia Gold a un archivo inexistente
+### 2026-09-16 — Ivy resolved dependencies at each Spark start
 
-- Estado: `RESUELTO`
-- Componente: DAG `urban_mobility_pipeline`.
-- Síntoma: el DAG apuntaba a `src/gold/driver_payouts.py`, archivo inexistente que habría fallado al alcanzar Gold.
-- Archivos/configuración implicados: `infra/airflow/dags/urban_mobility_pipeline.py`.
-- Solución aplicada: reemplazar esa tarea por el job existente `scripts/run/gold/_marts/aggregates/run_agg_driver_daily.sh`, con task id `compute_driver_daily_kpis`.
-- Validación: compilación Python correcta, Airflow carga ambas tareas Gold y `airflow dags list-import-errors` no reporta errores.
+- Status: `RESOLVED`.
+- Component: Delta Lake and Ivy.
+- Symptom: logs showed `resolving dependencies`, which looked like repeated downloads.
+- Evidence: Ivy reported `0 artifacts copied, 3 already retrieved` and `0 downloaded`.
+- Cause: `configure_spark_with_delta_pip()` still resolves coordinates but uses the preloaded cache.
+- Files: `infra/airflow/Dockerfile`, `src/common/spark.py`.
+- Fix: preload Delta 3.1.0 at image build and share the functional Ivy cache; retain PySpark 3.5.0 and Delta 3.1.0.
+- Verified: later runs downloaded no artifacts.
 
-### 2026-09-16 — Validación completa del DAG corregido
+### 2026-09-16 — Silver and Gold created duplicate Spark sessions
 
-- Estado: `PENDIENTE`
-- Componente: Airflow DAG run `manual__2026-09-16T06:14:39+00:00`.
-- Situación: el run se creó mientras el scheduler todavía conservaba la versión serializada anterior. Luego scheduler, webserver y triggerer fueron recreados; Airflow ya lista `gold_marts.compute_driver_daily_kpis`.
-- Validación completada: `compileall` correcto, `11 passed`, sin errores de importación, Bronze zones distribuido exitoso.
-- Seguimiento pendiente: confirmar el estado del run existente o iniciar un run nuevo si conservó el grafo anterior, y verificar todas las tareas hasta `success`.
+- Status: `RESOLVED`.
+- Component: PySpark/Delta jobs and wrappers.
+- Symptom: jobs used direct `SparkSession.builder.getOrCreate()` and local tuning while wrappers invoked `spark-submit --packages/--jars` first.
+- Cause: parallel session setup paths could disagree on master, memory, Delta, parallelism, and classpath.
+- Files: `src/common/spark.py`, `scripts/run/_common.sh`, Silver jobs, static Gold dimensions, and related tests.
+- Fix: use `build_spark(job_name)` in every job; wrappers run Python without a second SparkContext.
+- Verified: session creation exists only in the factory, wrapper scripts no longer use `spark-submit`, syntax checks passed, and 10 unit tests passed.
 
-### 2026-09-16 — Recreación Compose interrumpida dejó nombres temporales
+### 2026-09-16 — Host integration pytest waited for Ivy
 
-- Estado: `RESUELTO`
-- Componente: Docker Compose.
-- Síntoma: conflicto de nombre de contenedor durante `--force-recreate` después de que el comando excediera la ventana de espera.
-- Causa confirmada: Compose estaba a mitad de su estrategia de renombrado/recreación cuando la invocación fue interrumpida.
-- Solución aplicada: dejar terminar la reconciliación y volver a ejecutar `docker compose ... up -d --no-build`; no se borraron volúmenes ni datos.
-- Validación: servicios Airflow saludables, Master saludable y ambos workers registrados.
+- Status: `PENDING`.
+- Component: WSL virtual environment integration test.
+- Symptom: pytest waited after the test moved to `build_spark()`.
+- Evidence: local Java requested `io.delta:delta-spark_2.12:3.1.0` without the image's Ivy cache; 6.1 GiB RAM was available and swap was unused.
+- Cause: Delta package resolution in the host environment.
+- Follow-up: run integration in the preloaded Docker image or supply a valid host Ivy cache. Do not create a second Spark session for a faster test.
 
-### 2026-09-16 — Resolución Ivy aparece en cada inicio de Spark
+### 2026-09-16 — Wrappers required Git inside the image
 
-- Estado: `RESUELTO`
-- Componente: Delta Lake/Ivy.
-- Síntoma: el log muestra `resolving dependencies`, lo que puede parecer una descarga concurrente.
-- Evidencia: el reporte indicó `0 artifacts copied, 3 already retrieved` y `0 downloaded`.
-- Causa confirmada: `configure_spark_with_delta_pip()` sigue resolviendo coordenadas, pero usa el cache precargado de la imagen.
-- Archivos/configuración implicados: `infra/airflow/Dockerfile` y `src/common/spark.py`.
-- Solución aplicada: precargar Delta 3.1.0 durante el build y compartir el cache Ivy de sólo lectura funcional; se mantienen PySpark 3.5.0 y Delta 3.1.0.
-- Validación: ejecuciones posteriores no descargaron artefactos.
+- Status: `RESOLVED`.
+- Component: `scripts/run` wrappers.
+- Symptom: `run_zones_bronze.sh: line 4: git: command not found`.
+- Cause: wrappers used `git rev-parse` to locate the root, but the image had no Git.
+- Files: `infra/airflow/docker-compose.yaml`, wrapper scripts.
+- Fix: Compose supplies `PROJECT_DIR=/opt/project`; Git remains a host fallback.
+- Verified: Compose validated. Runtime smoke validation was tracked with the Docker incident below.
 
-### 2026-09-16 — Creación de SparkSession duplicada en Silver y Gold
+### 2026-09-16 — Docker metadata broke during recreation
 
-- Estado: `RESUELTO`
-- Componente: jobs PySpark/Delta y scripts `run`.
-- Síntoma: varios jobs Silver y dimensiones Gold usaban `SparkSession.builder.getOrCreate()` y configuración Delta/tuning local; los wrappers ejecutaban `spark-submit --packages/--jars` antes de que el código alcanzara el factory.
-- Causa confirmada: coexistían implementaciones antiguas con el factory común, por lo que master, memoria, cores, Delta, paralelismo y classpath podían divergir por job.
-- Archivos/configuración implicados: `src/common/spark.py`, `scripts/run/_common.sh`, ocho archivos bajo `src/silver`, tres dimensiones bajo `src/gold/_conformed/static`, `tmp/check_scd2.py` y `tests/integration/test_scd3_immediate_predecessor.py`.
-- Solución aplicada: todos los jobs llaman exclusivamente `build_spark(job_name)`; el factory aplica master, memoria, cores, UI, Delta extensions/catalog, shuffle, paralelismo, tamaño de partición, Ivy, JARs opcionales, auto-merge y validación de retención. Los wrappers ejecutan Python y ya no crean un SparkContext previo con `spark-submit`.
-- Validación: auditoría global sin violaciones; `SparkSession.builder`, `getOrCreate()` y `configure_spark_with_delta_pip()` aparecen sólo en `src/common/spark.py`; no quedan `spark.conf.set()` fuera del factory ni `spark-submit`, `--packages` o `--jars` en shell. Compilación y sintaxis shell correctas; 10 pruebas unitarias aprobadas.
+- Status: `RESOLVED` on 2026-09-19.
+- Component: WSL Docker Engine and Compose.
+- Symptom: temporary-name conflicts, `No such container`, missing RW layers, and an inactive Docker daemon.
+- Evidence: Docker logs showed missing layers for old Airflow containers after an interrupted `--force-recreate`; concurrent Compose/systemd recovery worsened the state.
+- Cause: ephemeral container metadata was left between removal and recreation. Persistent volumes remained intact.
+- Fix: remove orphaned project containers without `-v`, then stop Docker and its socket, remove only three confirmed dead container metadata directories, start Docker, and run one Compose reconciliation.
+- Verified: Docker became active; the worker saw `GDPR_HASH_KEY` length 64, GDPR run `manual__2026-09-19T00:12:54+00:00` succeeded, and the core pipeline had completed successfully.
 
-### 2026-09-16 — Pytest de integración host espera resolución Ivy
+### 2026-09-18 — BashOperator treated `.sh` commands as Jinja templates
 
-- Estado: `PENDIENTE`
-- Componente: `tests/integration/test_scd3_immediate_predecessor.py` ejecutado desde el venv WSL.
-- Síntoma: pytest quedó esperando después de migrar el test a `build_spark()`.
-- Evidencia: el proceso Java local se inició con `spark.jars.packages=io.delta:delta-spark_2.12:3.1.0`; el venv host no comparte el cache Ivy precargado de la imagen Docker. Había 6,1 GiB de RAM disponible y 0 swap usada, por lo que no fue OOM.
-- Causa confirmada: resolución de paquetes Delta sin cache disponible en el entorno host.
-- Solución prevista: ejecutar la integración dentro de la imagen Docker precargada o configurar un cache Ivy host válido; no volver a construir una SparkSession directa para acelerar el test.
-- Seguimiento pendiente: ejecutar el test de integración cuando Docker quede estable.
+- Status: `RESOLVED`.
+- Component: `urban_mobility_pipeline` BashOperator tasks.
+- Symptom: `jinja2.exceptions.TemplateNotFound` for `bash /opt/project/scripts/run/run_zones_bronze.sh`; Bronze failed before command execution.
+- Evidence: failure occurred in `render_templates` for run `manual__2026-09-18T21:48:11+00:00`.
+- Cause: BashOperator interprets a command ending in `.sh` as a template path.
+- Files: DAG wrapper commands.
+- Fix: leave one harmless trailing space after every wrapper command.
+- Verified: run `manual__2026-09-18T21:55:14+00:00` completed Bronze through Gold in 15 minutes with one Spark pool slot.
 
-### 2026-09-16 — Wrappers requieren Git dentro de la imagen
+### 2026-09-20 — Ratings SCD2 merge created duplicate current rows
 
-- Estado: `RESUELTO`
-- Componente: scripts bajo `scripts/run`.
-- Síntoma: `run_zones_bronze.sh: line 4: git: command not found`.
-- Causa confirmada: los wrappers usan `git rev-parse` como fallback para encontrar la raíz, pero la imagen no instala Git.
-- Archivos/configuración implicados: `infra/airflow/docker-compose.yaml` y wrappers `scripts/run/**/*.sh`.
-- Solución aplicada: Compose define `PROJECT_DIR=/opt/project`; los wrappers usan ese valor y conservan `git rev-parse` sólo como fallback para ejecución host.
-- Validación: configuración Compose válida. Smoke runtime pendiente por el incidente Docker descrito a continuación.
+- Status: `RESOLVED`.
+- Component: `src/silver/ratings_bronze_to_silver.py`.
+- Symptom: publishing failed with `UniqueViolation` for duplicate `rating_id=3945`.
+- Evidence: 4,566 ratings had more than one current Silver row, while source OLTP keys were unique.
+- Cause: both SCD2 merges matched on `trip_id` instead of the entity key `rating_id`.
+- Fix: match on current `rating_id` and collapse repeat observations per rating using `row_number()` ordered by `raw_loaded_at`. Rebuild inconsistent development lake data from OLTP with the documented rebootstrap path.
+- Verified: 5,194 ratings published without primary-key errors; the next incremental run added exactly one trip and one rating without duplicates.
 
-### 2026-09-16 — Metadatos Docker inconsistentes durante recreación
+### 2026-09-20 — Core DAG omitted `fact_trips` and Gold dependencies
 
-- Estado: `RESUELTO`
-- Componente: Docker Engine en WSL y Compose.
-- Síntoma: conflictos con nombres temporales, referencias `No such container`, capas `RW layer ... not found` y daemon Docker que vuelve a estado `inactive` durante la restauración.
-- Evidencia: `journalctl -u docker` registró capas faltantes para los antiguos webserver, scheduler y triggerer. El problema apareció después de que WSL interrumpiera una operación `--force-recreate`; una segunda invocación Compose/systemd concurrente agravó la reconciliación.
-- Causa confirmada: metadatos de contenedores efímeros quedaron a mitad de eliminación/recreación. Los volúmenes persistentes no fueron eliminados.
-- Acciones realizadas: `docker compose down --remove-orphans` sin `-v` retiró red y contenedores del proyecto; al recrear, el daemon todavía restauró referencias antiguas y volvió a detenerse.
-- Seguimiento pendiente: ninguno. Cerrado 2026-09-19.
-- Solución aplicada (2026-09-19): el `--force-recreate` dejó tres contenedores zombie en `Dead` que `docker rm -f` y `container prune` no podían eliminar (el daemon respondía `No such container` pero `docker ps -a` los listaba). Se resolvió deteniendo `docker`/`docker.socket` como root y eliminando a mano los directorios huérfanos `/var/lib/docker/containers/<id-full>`, luego `systemctl start docker`, un único `docker compose --profile spark-cluster up -d` sin operaciones concurrentes y verificación de `docker.service active`.
-- Validación: tras la recreación, el worker vio `GDPR_HASH_KEY` (largo 64) y `dag_gdpr_compliance` completó `success` (`manual__2026-09-19T00:12:54+00:00`, `row_count=0`, `touched_tables=0`, `vacuum_hours=168`); `urban_mobility_pipeline` había completado `success` con los wrappers (`manual__2026-09-18T21:55:14+00:00`).
+- Status: `RESOLVED`.
+- Component: `urban_mobility_pipeline` and `src/common/gold_marts.py`.
+- Symptom: `build_fact_trips` could not find `dim_zone`; aggregates could also use stale trip facts.
+- Cause: static and snapshot dimensions did not precede `fact_trips`, and the fact build was absent from an earlier DAG graph.
+- Fix: order Bronze, Silver dimensions and facts, Gold dimensions, trip facts, payment/rating facts and aggregates, then publish with explicit dependency edges.
+- Verified: bootstrap and incremental DAG runs succeeded; 11 of 11 reporting tables published and `reporting.fact_trips` matched OLTP at 43,001.
 
-### 2026-09-18 — BashOperator trata comandos terminados en `.sh` como plantilla Jinja
+### 2026-09-22 — Gold SCD3 was unused and facts used current dimensions
 
-- Estado: `RESUELTO`
-- Componente: `infra/airflow/dags/urban_mobility_pipeline.py` (BashOperator).
-- Síntoma: `jinja2.exceptions.TemplateNotFound: 'bash /opt/project/scripts/run/run_zones_bronze.sh' not found in search path: '/opt/airflow/dags'`; las cuatro tareas Bronze fallaron en segundos y Silver/Gold quedaron en `upstream_failed`.
-- Evidencia: log `attempt` de `bronze_ingestion.ingest_zones`, corrida `manual__2026-09-18T21:48:11+00:00`. El fallo ocurría en `render_templates`, antes de ejecutar el comando.
-- Causa confirmada: BashOperator renderiza `bash_command` con Jinja; cuando la cadena termina en una extensión de plantilla conocida (`.sh`), Jinja intenta cargarla como archivo de template en vez de tratarla como texto literal.
-- Archivos/configuración implicados: `infra/airflow/dags/urban_mobility_pipeline.py`, ocho `bash_command` que invocan wrappers de `scripts/run`.
-- Solución aplicada: agregar un espacio final a cada `bash_command` (`"...run_x.sh "`), truco documentado por Airflow para desactivar la resolución de plantilla; el espacio es inofensivo para bash.
-- Validación: corrida `manual__2026-09-18T21:55:14+00:00` completó `success` de Bronze a Gold (15 min, pool `spark_pool` de 1 slot), usando los wrappers del repo.
+- Status: `RESOLVED`.
+- Component: Gold dimensions, marts, contracts, DAG, retention, and GDPR.
+- Symptom: historical trips and ratings resolved dimension keys against current snapshots; no consumer used the SCD3 previous-value columns.
+- Cause: SCD3 was only a demonstration, while valid SCD2 history already existed in Silver.
+- Files: `src/common/gold_dimensions.py`, `src/common/gold_marts.py`, contracts, DAG, retention, GDPR, and temporal tests.
+- Fix: remove the unused SCD3 variant. Add deterministic surrogate keys to Gold history and current snapshots; resolve facts against the version effective at each event, with unknown key 0 for missing or earlier events.
+- Verified: 24 unit tests and temporal integration passed; historical keys remained stable across reruns, intervals did not overlap, 11 reporting tables published, and all 48,000 trips resolved dimension surrogate keys.
 
-### 2026-09-20 — SCD2 de ratings con merge clave en `trip_id` generaba filas `is_current` duplicadas
+### 2026-09-23 — Power BI Desktop imported rows slowly
 
-- Estado: `RESUELTO`
-- Componente: `src/silver/ratings_bronze_to_silver.py`.
-- Síntoma: al publicar a la capa serving, PostgreSQL rechazó el PRIMARY KEY: `psycopg2.errors.UniqueViolation: could not create unique index "fact_ratings_pkey" ... Key (rating_id)=(3945) is duplicated`.
-- Evidencia: diagnóstico sobre `data/dev/silver/ratings` arrojó 4,566 `rating_id` con más de una fila vigente (`is_current=true`). OLTP fuente NO tiene duplicados (`ratings_pkey`, UNIQUE `trip_id`); el defecto era de Silver.
-- Causa confirmada: los dos `MERGE` SCD2 se emparejaban con `t.trip_id = s.trip_id AND t.is_current = true` en vez de la clave real de la entidad (`rating_id`). Al re-observarse un `trip_id` ya vigente, el `whenNotMatchedInsert` de la segunda operación insertaba una versión nueva sin cerrar la anterior, dejando dos corrientes para el mismo `rating_id`.
-- Archivos/configuración implicados: `src/silver/ratings_bronze_to_silver.py`, y aguas abajo `fact_ratings` y el publish serving.
-- Solución aplicada: se cambió la clave de los dos merges a `t.rating_id = s.rating_id AND t.is_current = true`, más un `row_number()` por `rating_id` (ordenado por `raw_loaded_at` desc) que colapsa re-observaciones del mismo batch antes del merge. Como los datos de `data/dev` quedaron inconsistentes, se reconstruyó el lake completo desde el OLTP actual con la ruta de rebootstrap (`mv data/dev` de respaldo + migraciones 000–003 + DAG 1 + DAG 2), que es la semántica determinística ya documentada.
-- Validación: tras el rebootstrap, `fact_ratings` publicó `5,194` filas coincidentes con el conteo OLTP y el PRIMARY KEY de `reporting.fact_ratings` se creó sin violaciones (`publish_state` ok). La corrida incremental posterior (`manual__2026-09-20T04:20:01+00:00`, `success`) sumó exactamente 1 trip + 1 rating nuevos sin duplicar: `reporting.fact_trips` 43,001 y `fact_ratings` 5,195.
+- Status: `RESOLVED`.
+- Component: Power Query and analytics PostgreSQL.
+- Symptom: after fixing duplicate `trip_id` in the Trip bridge, `fact_trips` advanced only about 2,051 rows in several minutes.
+- Evidence: PostgreSQL read 48,000 rows in about 35 ms, then waited on the client for over six minutes; Mashup Container used one CPU core.
+- Cause: four local-hour columns were evaluated row by row in Power Query.
+- Files: `Trip.tmdl`, `fact_trips.tmdl`, and the Windows PBIP test copy.
+- Fix: select Trip keys directly and compute local-hour columns in PostgreSQL through a read-only native query, preserving UTC timestamps and the fixed UTC−3 transformation.
+- Verified: PostgreSQL returned 48,000 rows, the full query plan took about 42 ms, structural model checks passed, and the owner confirmed that Desktop refresh became fast.
+- Follow-up: time a full refresh if a formal benchmark is needed.
 
-### 2026-09-20 — DAG 1 no reconstruía `fact_trips` y ordenaba mal dependencias Gold
+### 2026-09-23 — Revenue Leakage DAX failed in the redesigned report
 
-- Estado: `RESUELTO`
-- Componente: `infra/airflow/dags/urban_mobility_pipeline.py`.
-- Síntoma: tras el rebootstrap, `gold_marts.build_fact_trips` falló con `RuntimeError: Required Gold dimension not found: data/dev/gold/_conformed/static/dim_zone`; además, en versiones previas los agregados podían recomputar contra un `fact_trips` viejo porque el DAG nunca lo reconstruía.
-- Causa confirmada: el grupo Gold no declaraba aristas entre dims static/snapshot y `fact_trips`, y el DAG no incluía la task `build_fact_trips`; `fact_trips` valida claves contra `dim_zone`/snapshot dims que debían existir primero.
-- Archivos/configuración implicados: `infra/airflow/dags/urban_mobility_pipeline.py`, contrato de `src/common/gold_marts.py` (`_validated_key`).
-- Solución aplicada: DAG 1 cableado como medallion completo (7 Bronze → dims Silver → facts Silver → dims Gold static/snapshot→hist→scd3 → `fact_trips` → `fact_payments`/`fact_ratings`/aggregates → `publish_reporting`), con aristas explícitas `[dim_date, dim_zone, snap_*] >> fact_trips` y `fact_trips >> [fact_ratings, aggs]`.
-- Validación: bootstrap `manual__2026-09-20T02:43:47+00:00` y corrida incremental `manual__2026-09-20T04:20:01+00:00` completaron `success` de punta a punta; `publish_state` reportó 11/11 tablas publicadas y `reporting.fact_trips` = 43,001 = OLTP.
+- Status: `RESOLVED`.
+- Component: `Revenue Leakage Trips` and `Revenue Leakage Amount` measures.
+- Symptom: Desktop could not determine a single `fact_trips[status]` value.
+- Cause: the expression read status without context transition and compared a payment trip key against a non-scalar trip column.
+- Fix: evaluate status per trip ID and keep each trip ID in a scalar variable when searching for paid payments. Preserve the completed-trip-without-paid-payment definition.
+- Verified: model structure passed, Desktop rendered Revenue, and Leakage Amount was 192,027 without filters, matching reporting SQL; all 48 PBIR files passed official schema validation.

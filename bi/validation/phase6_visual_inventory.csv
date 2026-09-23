@@ -1,0 +1,58 @@
+Page,Visual,Type,Measures / fields,Question answered,Decision
+DataHealth,dq_bar_flags_by_zone,clusteredColumnChart,Category: zone_name; Y: DQ Issue Trips; Series: status,What does DQ-flagged trips by zone reveal?,REPLACE
+DataHealth,dq_card_coords,card,Values: Coordinates Missing Rate,What is the current Coordinates Missing Rate?,REPLACE
+DataHealth,dq_card_erased,card,Values: Total Erased Subjects,What is the current Total Erased Subjects?,KEEP
+DataHealth,dq_card_fresh,card,Values: Last Gold Load,What is the current Last Gold Load?,REPLACE
+DataHealth,dq_card_imputed,card,Values: Imputed Fare Rate,What is the current Imputed Fare Rate?,KEEP
+DataHealth,dq_card_issue,card,Values: DQ Issue Trips,What is the current DQ Issue Trips?,KEEP
+DataHealth,dq_card_mismatch,card,Values: Driver-Vehicle Mismatch Trips,What is the current Driver-Vehicle Mismatch Trips?,REPLACE
+DataHealth,dq_card_pii,card,Values: PII Records Redacted,What is the current PII Records Redacted?,REPLACE
+DataHealth,dq_card_timeline,card,Values: Ended-Before-Started Timeline Issues,What is the current Ended-Before-Started Timeline Issues?,REPLACE
+DataHealth,dq_card_trust,card,Values: Data Trust Rate,What is the current Data Trust Rate?,KEEP
+DataHealth,dq_card_unassigned,card,Values: Unknown Driver Trips,What is the current Unknown Driver Trips?,REMOVE
+DataHealth,dq_header,textbox,,What context does this page provide?,KEEP
+DataHealth,dq_matrix_compliance,matrix,Rows: status; Values: Drivers Erased; Values: DQ Issue Rate,What does Erasure + trust by driver status reveal?,REPLACE
+DataHealth,dq_note,textbox,,What context does this page provide?,REPLACE
+DataHealth,dq_sl_date,slicer,Field: date,Which date filters the page?,KEEP
+Experience,exp_bar_cancelby,clusteredColumnChart,Category: cancel_by; Y: Cancelled Trips,What does Cancelled by actor reveal?,REMOVE
+Experience,exp_bar_vtype,barChart,Category: vehicle_type; Y: Average Rating,What does Average rating by vehicle type reveal?,KEEP
+Experience,exp_card_durations,card,Values: Average Trip Duration,What is the current Average Trip Duration?,REMOVE
+Experience,exp_card_five,card,Values: Five-Star Share,What is the current Five-Star Share?,REPLACE
+Experience,exp_card_gap,card,Values: Billing Gap Percent,What is the current Billing Gap Percent?,REMOVE
+Experience,exp_card_rating,card,Values: Average Rating,What is the current Average Rating?,KEEP
+Experience,exp_card_speed,card,Values: Effective Speed km/h,What is the current Effective Speed km/h?,REPLACE
+Experience,exp_donut_cancel,pieChart,Category: cancel_reason; Values: Cancelled Trips,What does Cancellations by reason reveal?,REPLACE
+Experience,exp_header,textbox,,What context does this page provide?,KEEP
+Experience,exp_note,textbox,,What context does this page provide?,REPLACE
+Experience,exp_scatter_delay,scatterChart,X: Median Acceptance Delay; Y: Average Rating; Category: driver_id,What does Driver point: delay vs rating reveal?,REPLACE
+Experience,exp_score_dist,clusteredColumnChart,Category: score; Y: Rating Count,What does Rating distribution reveal?,KEEP
+Experience,exp_sl_city,slicer,Field: city,Which city filters the page?,KEEP
+Experience,exp_sl_date,slicer,Field: date,Which date filters the page?,KEEP
+Experience,exp_sl_vehicle,slicer,Field: vehicle_type,Which vehicle_type filters the page?,REMOVE
+Operations,ops_card_active,card,Values: Active Trips,What is the current Active Trips?,REMOVE
+Operations,ops_card_completion,card,Values: Completion Rate,What is the current Completion Rate?,KEEP
+Operations,ops_card_delay,card,Values: Median Acceptance Delay,What is the current Median Acceptance Delay?,REPLACE
+Operations,ops_card_trips,card,Values: Trips,What is the current Trips?,KEEP
+Operations,ops_col_hour,clusteredColumnChart,Category: started_hour; Y: Trips; Series: status,What does Started trips by hour of day (status stacked) reveal?,REPLACE
+Operations,ops_col_zone,clusteredColumnChart,Category: zone_name; Y: Trips,What does Trips demand by pickup zone reveal?,REPLACE
+Operations,ops_donut_status,pieChart,Category: status; Values: Trips,What does Trip status mix reveal?,REMOVE
+Operations,ops_header,textbox,,What context does this page provide?,KEEP
+Operations,ops_matrix_zone,matrix,Rows: zone_name; Values: Trips; Values: Completion Rate; Values: Median Acceptance Delay,What does Zone scorecard reveal?,REPLACE
+Operations,ops_sl_city,slicer,Field: city,Which city filters the page?,KEEP
+Operations,ops_sl_date,slicer,Field: date,Which date filters the page?,KEEP
+Operations,ops_sl_vehicle,slicer,Field: vehicle_type,Which vehicle_type filters the page?,REMOVE
+Revenue,rev_bar_zone,barChart,Category: zone_name; Y: GMV,What does GMV by pickup zone (top) reveal?,KEEP
+Revenue,rev_card_collected,card,Values: Collected Amount,What is the current Collected Amount?,KEEP
+Revenue,rev_card_collection,card,Values: Collection Rate,What is the current Collection Rate?,KEEP
+Revenue,rev_card_dup,card,Values: Duplicate Payment Exposure,What is the current Duplicate Payment Exposure?,REMOVE
+Revenue,rev_card_gap,card,Values: Billing Gap Percent,What is the current Billing Gap Percent?,REMOVE
+Revenue,rev_card_gmv,card,Values: GMV,What is the current GMV?,KEEP
+Revenue,rev_card_leakamount,card,Values: Revenue Leakage Amount,What is the current Revenue Leakage Amount?,REPLACE
+Revenue,rev_card_leaktrips,card,Values: Revenue Leakage Trips,What is the current Revenue Leakage Trips?,REMOVE
+Revenue,rev_card_perkm,card,Values: Revenue per km,What is the current Revenue per km?,REMOVE
+Revenue,rev_header,textbox,,What context does this page provide?,KEEP
+Revenue,rev_matrix_drivers,matrix,Rows: driver_id; Values: Completed Trips; Values: GMV; Values: Average Rating,"What does Top drivers by GMV (driver_id only, no PII) reveal?",REPLACE
+Revenue,rev_sl_city,slicer,Field: city,Which city filters the page?,KEEP
+Revenue,rev_sl_date,slicer,Field: date,Which date filters the page?,KEEP
+Revenue,rev_sl_status,slicer,Field: status,Which status filters the page?,REMOVE
+Revenue,rev_stacked_method,clusteredColumnChart,Category: payment_method_name; Series: status; Y: Billed Amount,What does Billed amount by method and status reveal?,KEEP

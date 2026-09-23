@@ -1,0 +1,445 @@
+table _Measures
+	lineageTag: d1000000-0000-4000-8000-00000000000b
+	isHidden
+
+	measure Trips = ```
+			COUNTROWS ( fact_trips )
+			```
+		formatString: 0
+		displayFolder: Operations
+
+	measure 'Completed Trips' = ```
+			CALCULATE ( [Trips], fact_trips[status] = "completed" )
+			```
+		formatString: 0
+		displayFolder: Operations
+
+	measure 'Cancelled Trips' = ```
+			CALCULATE ( [Trips], fact_trips[status] IN { "cancelled", "canceled" } )
+			```
+		formatString: 0
+		displayFolder: Operations
+
+	measure 'Active Trips' = ```
+			[Trips] - [Completed Trips] - [Cancelled Trips]
+			```
+		formatString: 0
+		displayFolder: Operations
+
+	measure 'Completion Rate' = ```
+			DIVIDE ( [Completed Trips], [Trips] )
+			```
+		formatString: "0.0%"
+		displayFolder: Operations
+
+	measure 'Cancellation Rate' = ```
+			DIVIDE ( [Cancelled Trips], [Trips] )
+			```
+		formatString: "0.0%"
+		displayFolder: Operations
+
+	measure 'Active Trip Rate' = ```
+			DIVIDE ( [Active Trips], [Trips] )
+			```
+		formatString: "0.0%"
+		displayFolder: Operations
+
+	measure 'Average Acceptance Delay' = ```
+			AVERAGE ( fact_trips[acceptance_delay_minutes] )
+			```
+		formatString: 0.0
+		displayFolder: Operations
+
+	measure 'Median Acceptance Delay' = ```
+			MEDIAN ( fact_trips[acceptance_delay_minutes] )
+			```
+		formatString: 0.0
+		displayFolder: Operations
+
+	measure 'P90 Acceptance Delay' = ```
+			PERCENTILEX.INC (
+			fact_trips,
+			fact_trips[acceptance_delay_minutes],
+			0.9
+			)
+			```
+		formatString: 0.0
+		displayFolder: Operations
+
+	measure 'Average Trip Duration' = ```
+			CALCULATE (
+			AVERAGE ( fact_trips[trip_duration_minutes] ),
+			fact_trips[trip_duration_minutes] > 0,
+			fact_trips[trip_duration_minutes] < 600
+			)
+			```
+		formatString: 0.0
+		displayFolder: Operations
+
+	measure 'Trip Duration Outlier Rate' = ```
+			DIVIDE (
+			CALCULATE ( [Trips], fact_trips[is_trip_duration_outlier] ),
+			[Trips]
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: Operations
+
+	measure 'Effective Speed km/h' = ```
+			DIVIDE (
+			CALCULATE (
+				SUM ( fact_trips[actual_distance_km] ),
+				fact_trips[trip_duration_minutes] > 0,
+				fact_trips[trip_duration_minutes] < 600
+			),
+			DIVIDE (
+				CALCULATE (
+					SUM ( fact_trips[trip_duration_minutes] ),
+					fact_trips[trip_duration_minutes] > 0,
+					fact_trips[trip_duration_minutes] < 600
+				),
+				60
+			)
+			)
+			```
+		formatString: 0.0
+		displayFolder: Operations
+
+	measure 'Distinct Passengers' = ```
+			COUNTROWS ( VALUES ( fact_trips[passenger_key] ) )
+			```
+		formatString: 0
+		displayFolder: Operations
+
+	measure 'Trips per Passenger' = ```
+			DIVIDE ( [Trips], [Distinct Passengers] )
+			```
+		formatString: 0.00
+		displayFolder: Operations
+
+	measure GMV = ```
+			CALCULATE (
+			SUM ( fact_trips[fare_amount] ),
+			fact_trips[fare_amount] > 0
+			)
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Analytical GMV' = ```
+			SUM ( fact_trips[fare_amount_analytical] )
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Imputed Fare Amount' = ```
+			[Analytical GMV] - [GMV]
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Billed Amount' = ```
+			SUM ( fact_payments[amount] )
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Collected Amount' = ```
+			CALCULATE (
+			SUM ( fact_payments[amount] ),
+			fact_payments[status] = "paid"
+			)
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Collection Rate' = ```
+			DIVIDE ( [Collected Amount], [Billed Amount] )
+			```
+		formatString: "0.0%"
+		displayFolder: Revenue
+
+	measure 'Average Fare' = ```
+			DIVIDE ( [GMV], [Completed Trips] )
+			```
+		formatString: "$#,##0.00"
+		displayFolder: Revenue
+
+	measure 'Revenue per Trip' = ```
+			DIVIDE ( [GMV], [Trips] )
+			```
+		formatString: "$#,##0.00"
+		displayFolder: Revenue
+
+	measure 'Revenue per km' = ```
+			DIVIDE (
+			[GMV],
+			CALCULATE (
+				SUM ( fact_trips[actual_distance_km] ),
+				fact_trips[actual_distance_km] > 0
+			)
+			)
+			```
+		formatString: "$#,##0.00"
+		displayFolder: Revenue
+
+	measure 'Revenue Leakage Trips' = ```
+			VAR _completed =
+			    FILTER (
+			        VALUES ( fact_trips[trip_id] ),
+			        CALCULATE ( SELECTEDVALUE ( fact_trips[status] ) ) = "completed"
+			    )
+			VAR _leak =
+			    FILTER (
+			        _completed,
+			        VAR _trip_id = fact_trips[trip_id]
+			        RETURN
+			            CALCULATE (
+			                COUNTROWS ( fact_payments ),
+			                fact_payments[trip_id] = _trip_id,
+			                fact_payments[status] = "paid"
+			            ) = 0
+			    )
+			RETURN
+			    COUNTROWS ( _leak )
+			```
+		formatString: 0
+		displayFolder: Revenue
+
+	measure 'Revenue Leakage Amount' = ```
+			VAR _completed =
+			    FILTER (
+			        VALUES ( fact_trips[trip_id] ),
+			        CALCULATE ( SELECTEDVALUE ( fact_trips[status] ) ) = "completed"
+			    )
+			VAR _leak =
+			    FILTER (
+			        _completed,
+			        VAR _trip_id = fact_trips[trip_id]
+			        RETURN
+			            CALCULATE (
+			                COUNTROWS ( fact_payments ),
+			                fact_payments[trip_id] = _trip_id,
+			                fact_payments[status] = "paid"
+			            ) = 0
+			    )
+			RETURN
+			    SUMX ( _leak, CALCULATE ( MAX ( fact_trips[fare_amount] ) ) )
+			```
+		formatString: "$#,##0"
+		displayFolder: Revenue
+
+	measure 'Revenue Leakage Rate' = ```
+			DIVIDE ( [Revenue Leakage Trips], [Completed Trips] )
+			```
+		formatString: "0.0%"
+		displayFolder: Revenue
+
+	measure 'Duplicate Payment Exposure' = ```
+			CALCULATE (
+			SUM ( fact_payments[amount] ),
+			fact_payments[duplicate_provider_ref]
+			)
+			```
+		formatString: "$#,##0"
+		displayFolder: Technical
+
+	measure 'Billing Gap km' = ```
+			CALCULATE (
+			SUM ( fact_trips[actual_distance_km] ) - SUM ( fact_trips[estimated_distance_km] ),
+			fact_trips[actual_distance_km] > 0,
+			fact_trips[estimated_distance_km] > 0
+			)
+			```
+		formatString: 0.0
+		displayFolder: Revenue
+
+	measure 'Billing Gap Percent' = ```
+			DIVIDE (
+			[Billing Gap km],
+			CALCULATE (
+				SUM ( fact_trips[estimated_distance_km] ),
+				fact_trips[estimated_distance_km] > 0
+			)
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: Revenue
+
+	measure 'Rating Count' = ```
+			COUNTROWS ( fact_ratings )
+			```
+		formatString: 0
+		displayFolder: Experience
+
+	measure 'Average Rating' = ```
+			CALCULATE (
+			AVERAGE ( fact_ratings[score] ),
+			NOT fact_ratings[score_invalid]
+			)
+			```
+		formatString: 0.00
+		displayFolder: Experience
+
+	measure 'Five-Star Share' = ```
+			DIVIDE (
+			CALCULATE ( [Rating Count], fact_ratings[score] = 5 ),
+			CALCULATE ( [Rating Count], NOT fact_ratings[score_invalid] )
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: Experience
+
+	measure 'Low Rating Share' = ```
+			DIVIDE (
+			CALCULATE (
+				[Rating Count],
+				NOT fact_ratings[score_invalid],
+				fact_ratings[score] <= 2
+			),
+			CALCULATE ( [Rating Count], NOT fact_ratings[score_invalid] )
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: Experience
+
+	measure 'Valid Rating Count' = ```
+			CALCULATE ( [Rating Count], NOT fact_ratings[score_invalid] )
+			```
+		formatString: 0
+		displayFolder: Experience
+
+	measure 'DQ Issue Trips' = ```
+			CALCULATE (
+			[Trips],
+			fact_trips[coordinates_missing]
+				|| fact_trips[completed_but_ended_at_null]
+				|| fact_trips[ended_before_started]
+				|| fact_trips[driver_vehicle_mismatch]
+				|| fact_trips[is_distance_outlier]
+				|| fact_trips[is_acceptance_delay_outlier]
+				|| fact_trips[is_trip_duration_outlier]
+			)
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'DQ Issue Rate' = ```
+			DIVIDE ( [DQ Issue Trips], [Trips] )
+			```
+		formatString: "0.0%"
+		displayFolder: "Data Quality"
+
+	measure 'Data Trust Rate' = ```
+			1 - [DQ Issue Rate]
+			```
+		formatString: "0.0%"
+		displayFolder: "Data Quality"
+
+	measure 'Coordinates Missing Rate' = ```
+			DIVIDE (
+			CALCULATE ( [Trips], fact_trips[coordinates_missing] ),
+			[Trips]
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: "Data Quality"
+
+	measure 'Ended-Before-Started Timeline Issues' = ```
+			CALCULATE ( [Trips], fact_trips[ended_before_started] )
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'Driver-Vehicle Mismatch Trips' = ```
+			CALCULATE ( [Trips], fact_trips[driver_vehicle_mismatch] )
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'Imputed Fare Rate' = ```
+			DIVIDE (
+			CALCULATE ( [Trips], fact_trips[fare_amount_was_imputed] ),
+			[Trips]
+			)
+			```
+		formatString: "0.0%"
+		displayFolder: "Data Quality"
+
+	measure 'Unknown Driver Trips' = ```
+			CALCULATE ( [Trips], fact_trips[driver_key] = 0 )
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'Currency Normalized Trips' = ```
+			CALCULATE ( COUNTROWS ( fact_payments ), fact_payments[currency_was_normalized] )
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'PII Records Redacted' = ```
+			CALCULATE (
+			[Trips],
+			fact_trips[cancel_note_contains_potential_pii]
+			)
+			+ CALCULATE (
+				COUNTROWS ( fact_ratings ),
+				fact_ratings[comment_contains_potential_pii]
+			)
+			+ CALCULATE (
+				COUNTROWS ( fact_payments ),
+				fact_payments[provider_ref_contains_potential_pii]
+			)
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'Passengers Erased' = ```
+			CALCULATE (
+			COUNTROWS ( dim_passenger ),
+			dim_passenger[is_deleted]
+			)
+			```
+		formatString: 0
+		displayFolder: Compliance
+
+	measure 'Drivers Erased' = ```
+			CALCULATE (
+			COUNTROWS ( dim_driver ),
+			dim_driver[is_deleted]
+			)
+			```
+		formatString: 0
+		displayFolder: Compliance
+
+	measure 'Vehicles Erased' = ```
+			CALCULATE (
+			COUNTROWS ( dim_vehicle ),
+			dim_vehicle[is_deleted]
+			)
+			```
+		formatString: 0
+		displayFolder: Compliance
+
+	measure 'Total Erased Subjects' = ```
+			[Passengers Erased] + [Drivers Erased] + [Vehicles Erased]
+			```
+		formatString: 0
+		displayFolder: Compliance
+
+	measure 'Last Gold Load' = ```
+			MAX ( fact_trips[dwh_loaded_at] )
+			```
+		formatString: "yyyy-mm-dd hh:mm"
+		displayFolder: Technical
+
+	partition Measures-01 = m
+		mode: import
+		source =
+				let
+				    Source = {}
+				in
+				    Source
+
+	annotation PBI_ResultType = Table

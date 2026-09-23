@@ -1,0 +1,69 @@
+table dim_date
+	lineageTag: c1000000-0000-4000-8000-000000000004
+
+	column date_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		isKey: true
+		sourceColumn: date_key
+
+	column date
+		dataType: dateTime
+		formatString: "yyyy-mm-dd"
+		summarizeBy: none
+		sourceColumn: date
+
+	column year
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: year
+
+	column month
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: month
+
+	column day
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: day
+
+	column quarter
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: quarter
+
+	column week_of_year
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		sourceColumn: week_of_year
+
+	column day_name
+		dataType: string
+		summarizeBy: none
+		sourceColumn: day_name
+
+	column is_weekend
+		dataType: boolean
+		summarizeBy: none
+		sourceColumn: is_weekend
+
+	partition dim_date-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_dim_date = Source{[Schema="reporting", Item="dim_date"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_dim_date, {"date_key","date","year","month","day","quarter","week_of_year","day_name","is_weekend"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

@@ -1,235 +1,52 @@
-﻿# Guía de Operación y Arquitectura: Airflow + Apache Spark en WSL
+# Airflow and Spark operations
 
-Este documento detalla la arquitectura, cómo está configurado el entorno local (emulando Cloud), cómo operarlo diariamente y cómo continuar agregando tareas de ingeniería de datos.
+## Local stack
 
----
+Docker Compose runs Apache Airflow 2.10.5, PostgreSQL metadata storage, Redis, a Celery worker, Spark master and workers, and the analytics PostgreSQL service. The repository is mounted at `/opt/project`; DAG files come from `infra/airflow/dags/`. The web UI is available at `http://localhost:8080` while the stack is running. The development `admin/admin` account must not be used for a non-local deployment.
 
-## 1. Arquitectura del Entorno
+The DAGs only orchestrate jobs. Each data task invokes its wrapper under `scripts/run/`, so CLI and Airflow use the same entry point. Spark jobs create sessions through `src/common/spark.py`, not inside the DAG file.
 
-El pipeline está montado sobre **Docker Compose en WSL 2 (Ubuntu 22.04)** y accesible desde el navegador de Windows.
+## Start and inspect
 
-```text
-[ Windows Host ] ─── Navegador Web (http://localhost:8080)
-       │
-       ▼ (WSL 2 Port Forwarding)
-[ WSL 2: Ubuntu 22.04 ]
-       │
-       ├── Docker Compose (`infra/airflow/`)
-       │     ├── airflow-webserver (Puerto 8080)
-       │     ├── airflow-scheduler (Monitorea y agenda DAGs)
-       │     ├── airflow-worker (Ejecutor Celery: con Java 17 + PySpark 3.5.0 + Delta)
-       │     ├── airflow-triggerer
-       │     ├── postgres (Metadata Database de Airflow)
-       │     └── redis (Broker de mensajería para Celery)
-       │
-       └── Repositorio Local (`/home/hernan/Urban-Mobility-Data-Pipeline`)
-             ├── Montado adentro de los contenedores como `/opt/project`
-             └── Sus DAGs se sincronizan en tiempo real desde `infra/airflow/dags/`
-```
+Run these commands from `infra/airflow/`:
 
----
-
-## 2. Credenciales y URLs de Acceso
-
-- **URL de la Interfaz Web:** [http://localhost:8080](http://localhost:8080)
-- **Usuario:** `admin`
-- **Contraseña:** `admin`
-
-*(Para monitorear los contenedores desde la terminal de WSL o Windows puedes usar `lazydocker` o `docker compose ps`).*
-
----
-
-## 3. Comandos de Operación Diaria (Cheat Sheet)
-
-Ejecutar siempre desde la carpeta `infra/airflow/`:
-
-```bash
-cd /home/hernan/Urban-Mobility-Data-Pipeline/infra/airflow
-```
-
-### A. Iniciar el entorno
 ```bash
 docker compose --profile spark-cluster up -d
-```
-
-Este es el modo normal: Airflow envía los jobs a
-`spark://spark-master:7077`.
-
-### B. Detener el entorno (sin perder datos ni historial)
-```bash
-docker compose stop
-```
-*(O `docker compose down` si deseas remover los contenedores).*
-
-### C. Ver estado y logs
-```bash
 docker compose ps
-docker compose logs -f airflow-worker
 docker compose logs -f airflow-scheduler
+docker compose logs -f airflow-worker
 ```
 
-### D. Si modificas el `Dockerfile` (nuevas librerías de Python o paquetes del sistema)
-```bash
-docker compose build
-docker compose up -d
-```
+Use `docker compose stop` to stop services without deleting data. Rebuild the image with `docker compose build` after changing the Dockerfile or its dependencies. Never remove persistent volumes as part of a routine restart.
 
----
+## DAGs
 
-## 4. Estructura del DAG de Producción (`urban_mobility_pipeline.py`)
+| DAG | Work | Test branch |
+|---|---|---|
+| `urban_mobility_pipeline` | Bronze, Silver, Gold, then atomic publish to analytics PostgreSQL | Manual |
+| `dag_gdpr_compliance` | Propagate erasures, vacuum affected tables, and republish | Manual |
+| `dag_lakehouse_retention_vacuum` | Bronze and Silver retention, then Gold vacuum | Manual |
+| `dag_generate_mock_data` | Append synthetic OLTP data for tests | Manual only |
 
-Ubicación del archivo:
-`infra/airflow/dags/urban_mobility_pipeline.py`
-*(Desde Windows: `\\wsl.localhost\Ubuntu-22.04\home\hernan\Urban-Mobility-Data-Pipeline\infra\airflow\dags\urban_mobility_pipeline.py`)*
+The production branch schedules the three operational DAGs in `America/Asuncion`. The synthetic generator remains manual. See `dags/DAGS.md` for the branch schedule. Airflow's `spark_pool` has one slot, and each DAG limits active runs to protect the local Spark cluster. A trailing space after each `.sh` BashOperator command prevents Airflow from treating the command as a Jinja template path.
 
-El DAG implementa la **Arquitectura Medallion** con los siguientes componentes clave:
+## Configuration
 
-1. **`spark_execution_check` (`PythonOperator`):**
-   - Inicializa una `SparkSession` real adentro del worker.
-   - Demuestra que el entorno tiene acceso a Spark y puede procesar DataFrames distribuidos.
+Copy `.env.example` to `.env` and supply the required database passwords and `GDPR_HASH_KEY`. Do not commit `.env`. The Compose file passes `OLTP_DB_*` to the application; generic `DB_HOST` conflicts with the Airflow image entrypoint. `ENV` selects the data directory under `data/<ENV>/`.
 
-2. **`TaskGroups` organizados:**
-   - `bronze_ingestion`: Ingesta cruda de zonas, pasajeros, conductores y viajes en paralelo.
-   - `silver_processing`: Limpieza, deduplicación y estructuración de tablas maestras y de hechos.
-   - `gold_marts`: Cálculo de agregaciones analíticas y KPIs.
+The normal Spark master is `spark://spark-master:7077`. The driver runs in the Airflow worker. The default local limits are Celery concurrency 2, one Spark pool slot, one active run per DAG, a 1 GB driver, and two Spark workers with 1 core and 768 MB each. Override resource settings through the variables documented in `.env.example` when needed.
 
-3. **Flujo de Dependencias:**
-   ```python
-   start >> run_spark_check >> bronze_group >> silver_group >> gold_group >> end
-   ```
+Local interfaces: Airflow `:8080`, Spark master `:8081`, Spark workers `:8082` and `:8083`, and the active Spark driver `:4040`.
 
----
+## Verify a change
 
-## 5. Cómo agregar y continuar codeando tus tareas
-
-### Patrón 1: Tareas con PySpark nativo (`PythonOperator`)
-Úsalo cuando quieras procesar DataFrames directamente dentro del pipeline:
-
-```python
-from airflow.operators.python import PythonOperator
-
-def mi_tarea_spark(**context):
-    from pyspark.sql import SparkSession
-    spark = SparkSession.builder.appName("MiProceso").getOrCreate()
-
-    # Lectura de datos Delta en tu repositorio montado
-    df = spark.read.format("delta").load("/opt/project/data/dev/bronze/zones")
-
-    # Transformaciones
-    df_clean = df.dropDuplicates(["zone_id"])
-
-    # Escritura en Silver
-    df_clean.write.format("delta").mode("append").save("/opt/project/data/dev/silver/zones")
-    spark.stop()
-
-tarea_spark = PythonOperator(
-    task_id="transformar_zonas_silver",
-    python_callable=mi_tarea_spark,
-)
-```
-
-### Patrón 2: Ejecutar scripts existentes del repositorio (`BashOperator`)
-Úsalo para correr directamente tus scripts de `src/` o `scripts/`:
-
-```python
-from airflow.operators.bash import BashOperator
-
-tarea_script = BashOperator(
-    task_id="ingesta_zones_oltp",
-    bash_command="python3 /opt/project/src/bronze/zones_oltp_to_bronze.py",
-)
-```
-
----
-
-## 6. Variables de Entorno y Conexiones
-
-En `infra/airflow/.env` se encuentran configuradas las variables que consumen los scripts:
-- `ENV`: `dev`
-- `OLTP_DB_HOST`: `host.docker.internal`
-- `DB_NAME`: `mobility_oltp`
-- `DB_USER`: `postgres`
-- `DB_PASSWORD`: Password de tu base de datos relacional OLTP.
-
-Cualquier cambio que guardes en tus archivos `.py` dentro de `dags/` se refleja automáticamente en la web sin necesidad de reiniciar Docker.
-
----
-
-## 7. Recursos y concurrencia para desarrollo local
-
-La configuración predeterminada protege WSL de ejecuciones Spark simultáneas:
-
-- `AIRFLOW__CELERY__WORKER_CONCURRENCY=2`.
-- `max_active_runs=1` en el DAG principal.
-- pool `spark_pool` con un slot para todas las tareas Spark.
-- driver Spark con `1g`.
-- dos workers Spark con un core y `768m` cada uno.
-- límites Docker de `0.5 CPU/512m` para el master y
-  `1 CPU/1280m` para cada worker.
-
-Los valores pueden ajustarse con variables de entorno:
-
-```text
-AIRFLOW_WORKER_CONCURRENCY=2
-AIRFLOW_DAG_MAX_ACTIVE_RUNS=1
-AIRFLOW_SPARK_POOL=spark_pool
-AIRFLOW_SPARK_POOL_SLOTS=1
-SPARK_MASTER=spark://spark-master:7077
-SPARK_DRIVER_MEMORY=1g
-SPARK_EXECUTOR_MEMORY=768m
-SPARK_EXECUTOR_CORES=1
-SPARK_WORKER_CORES=1
-SPARK_WORKER_MEMORY=768m
-```
-
-El driver se ejecuta dentro de `airflow-worker`. El Spark Master sólo
-coordina recursos. Cada Spark Worker aloja executors de un core. Los JARs de
-Delta 3.1.0 se resuelven durante el build de la imagen y el driver los entrega
-a los executors, evitando descargas concurrentes durante el DAG.
-
-Interfaces disponibles mientras el stack está activo:
-
-- Airflow: `http://localhost:8080`.
-- Spark Master: `http://localhost:8081`.
-- Spark Worker 1: `http://localhost:8082`.
-- Spark Worker 2: `http://localhost:8083`.
-- Spark Driver: `http://localhost:4040` mientras se ejecuta un job.
-
-Los enlaces de Worker mostrados por la UI del Spark Master anuncian
-`localhost` y el puerto público correspondiente, por lo que también son
-accesibles directamente desde el navegador de Windows.
-
-### Modo distribuido normal
+Check DAG imports before running a task:
 
 ```bash
-docker compose build
-docker compose --profile spark-cluster up -d
+docker compose exec airflow-scheduler airflow dags list-import-errors
+docker compose exec airflow-scheduler airflow dags list
 ```
 
-### Fallback local para debugging
+Inspect task logs in Airflow or with `docker compose logs`. For a new failure, check `docs/troubleshooting.md` before changing the pipeline.
 
-```bash
-docker compose --profile spark-cluster stop \
-  spark-worker-1 spark-worker-2 spark-master
-
-SPARK_MASTER='local[2]' docker compose up -d --force-recreate \
-  airflow-webserver airflow-scheduler airflow-worker airflow-triggerer
-```
-
-Para volver al modo distribuido:
-
-```bash
-docker compose --profile spark-cluster up -d --force-recreate
-```
-
-### Inicio automático con WSL
-
-La unidad `urban-mobility-airflow.service` ejecuta el modo distribuido normal
-después de que Docker esté disponible. Se instala una sola vez con:
-
-```bash
-sudo install -m 0644 urban-mobility-airflow.service \
-  /etc/systemd/system/urban-mobility-airflow.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now urban-mobility-airflow.service
-```
+The optional `urban-mobility-airflow.service` starts the distributed stack after Docker becomes available in WSL. Its source file is in this directory; installing or enabling it changes host startup behavior and is a separate operation.

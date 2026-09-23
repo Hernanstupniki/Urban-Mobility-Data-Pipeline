@@ -1,0 +1,76 @@
+{
+  "name": "UrbanLight",
+  "dataColors": [
+    "#087E8B",
+    "#4169B1",
+    "#2E8B74",
+    "#C78529",
+    "#BD5263",
+    "#516276",
+    "#277FB2",
+    "#7863B0"
+  ],
+  "good": "#2E8B74",
+  "neutral": "#C78529",
+  "bad": "#BD5263",
+  "maximum": "#2E8B74",
+  "center": "#C78529",
+  "minimum": "#BD5263",
+  "foreground": "#15253A",
+  "background": "#F7F9FC",
+  "tableAccent": "#087E8B",
+  "null": "#334155",
+  "visualStyles": {
+    "page": {
+      "*": {
+        "background": [
+          {
+            "transparency": 0,
+            "solidColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "\"#F7F9FC\""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "outspace": [
+          {
+            "transparency": 0,
+            "solidColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "\"#E9EEF4\""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "visualHeaders": {
+      "*": {
+        "general": [
+          {
+            "textColor": {
+              "expr": {
+                "Literal": {
+                  "Value": "\"#516276\""
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+relationship rel_trips_date
+	fromColumn: fact_trips.request_date_key
+	toColumn: dim_date.date_key
+
+relationship rel_payments_date
+	fromColumn: fact_payments.payment_date_key
+	toColumn: dim_date.date_key
+
+relationship rel_ratings_date
+	fromColumn: fact_ratings.rating_date_key
+	toColumn: dim_date.date_key
+
+relationship rel_trips_pickup_zone
+	fromColumn: fact_trips.pickup_zone_key
+	toColumn: Zone.zone_id
+
+relationship rel_trips_dropoff_zone
+	fromColumn: fact_trips.dropoff_zone_key
+	toColumn: 'Dropoff Zone'.zone_id
+
+relationship rel_trips_driver
+	fromColumn: fact_trips.driver_key
+	toColumn: dim_driver.driver_id
+
+relationship rel_trips_passenger
+	fromColumn: fact_trips.passenger_key
+	toColumn: dim_passenger.passenger_id
+
+relationship rel_trips_vehicle
+	fromColumn: fact_trips.vehicle_key
+	toColumn: dim_vehicle.vehicle_id
+
+relationship rel_payments_method
+	fromColumn: fact_payments.payment_method_key
+	toColumn: dim_payment_method.payment_method_key
+
+relationship rel_trip_pickup_zone
+	fromColumn: Trip.pickup_zone_key
+	toColumn: Zone.zone_id
+
+relationship rel_trip_dropoff_zone
+	fromColumn: Trip.dropoff_zone_key
+	toColumn: 'Dropoff Zone'.zone_id
+
+relationship rel_trip_driver
+	fromColumn: Trip.driver_key
+	toColumn: dim_driver.driver_id
+
+relationship rel_trip_passenger
+	fromColumn: Trip.passenger_key
+	toColumn: dim_passenger.passenger_id
+
+relationship rel_trip_vehicle
+	fromColumn: Trip.vehicle_key
+	toColumn: dim_vehicle.vehicle_id
+
+relationship rel_trip_payments
+	fromColumn: fact_payments.trip_id
+	toColumn: Trip.trip_id
+
+relationship rel_trip_ratings
+	fromColumn: fact_ratings.trip_key
+	toColumn: Trip.trip_id

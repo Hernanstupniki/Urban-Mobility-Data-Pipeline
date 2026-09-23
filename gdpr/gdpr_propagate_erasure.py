@@ -157,7 +157,6 @@ def _subject_paths(settings: Settings, kind: str) -> list[tuple[str, str, bool]]
         ("gold_hist", settings.path("gold", "_conformed", "hist", f"dim_{kind}_hist"), False),
         ("gold_hist_legacy", settings.path("gold", "_conformed", "hist", f"dim_{kind}"), False),
         ("gold_snapshot", settings.path("gold", "_conformed", "snapshot", f"dim_{kind}"), False),
-        ("gold_scd3", settings.path("gold", "_conformed", "scd3", f"dim_{kind}"), False),
     ]
 
 

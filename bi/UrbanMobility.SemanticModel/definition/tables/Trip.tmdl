@@ -1,0 +1,66 @@
+table Trip
+	lineageTag: e1000000-0000-4000-8000-00000000000c
+	isHidden
+
+	column trip_id
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isKey: true
+		isHidden
+		displayFolder: Keys
+		sourceColumn: trip_id
+
+	column pickup_zone_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: pickup_zone_key
+
+	column dropoff_zone_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: dropoff_zone_key
+
+	column driver_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: driver_key
+
+	column passenger_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: passenger_key
+
+	column vehicle_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		displayFolder: Keys
+		sourceColumn: vehicle_key
+
+	partition Trip-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    t = Source{[Schema="reporting", Item="fact_trips"]}[Data],
+				    d = Table.Distinct(
+				        Table.SelectColumns(t, {"trip_id","pickup_zone_key","dropoff_zone_key","driver_key","passenger_key","vehicle_key"}),
+				        {"trip_id"})
+				in
+				    d
+
+	annotation PBI_ResultType = Table

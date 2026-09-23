@@ -1,0 +1,44 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.2.0/schema.json",
+  "name": "rev_header",
+  "position": {
+    "x": 28,
+    "y": 18,
+    "z": 0,
+    "width": 1020,
+    "height": 48
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "REVENUE",
+                    "textStyle": {
+                      "fontWeight": "bold",
+                      "fontSize": "20pt",
+                      "color": "#15253A"
+                    }
+                  },
+                  {
+                    "value": "   Where is value created and collected?",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#516276"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

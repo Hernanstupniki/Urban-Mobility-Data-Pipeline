@@ -1,0 +1,37 @@
+table dim_payment_method
+	lineageTag: c4000000-0000-4000-8000-000000000007
+
+	column payment_method_key
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		isHidden
+		isKey: true
+		sourceColumn: payment_method_key
+
+	column payment_method_name
+		dataType: string
+		summarizeBy: none
+		sourceColumn: payment_method_name
+
+	column is_cash
+		dataType: boolean
+		summarizeBy: none
+		sourceColumn: is_cash
+
+	column is_card
+		dataType: boolean
+		summarizeBy: none
+		sourceColumn: is_card
+
+	partition dim_payment_method-01 = m
+		mode: import
+		source =
+				let
+				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
+				    reporting_dim_payment_method = Source{[Schema="reporting", Item="dim_payment_method"]}[Data],
+				    #"Selected Columns" = Table.SelectColumns(reporting_dim_payment_method, {"payment_method_key","payment_method_name","is_cash","is_card"})
+				in
+				    #"Selected Columns"
+
+	annotation PBI_ResultType = Table

@@ -294,7 +294,7 @@ def main():
         )
 
         # 4) Enrichment / data quality flags
-        # (robusto por si tus enums varían un poco)
+        # Allow minor differences in enum values.
         paid_like_statuses = ["paid", "succeeded", "success", "completed", "settled"]
 
         enriched_df = (

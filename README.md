@@ -21,7 +21,7 @@ PostgreSQL (mobility_oltp)            WSL 2 / Docker Compose
       |  typing, dedup, SCD2, DQ      | airflow-worker (Spark     |
       v                               |   driver) + celery        |
  Silver (conformed Delta)             | spark-master :8081        |
-      |  snapshot / hist / scd3 /     | spark-worker-1..2 :8082/3 |
+      |  snapshot / hist SCD2 /       | spark-worker-1..2 :8082/3 |
       v   static dims + marts         | postgres (Airflow meta)   |
  Gold (Star-schema Delta)             | redis (Celery broker)     |
       |  publish: JDBC + atomic swap  | oltp-db-proxy (bridge)    |
@@ -69,6 +69,7 @@ retention/       Bronze/Silver/Gold cleanup entry points
 publishing/      Gold -> analytics PostgreSQL serving-layer publish job
 scripts/         generate_oltp_data/ + run/ wrappers (_common.sh resolver)
 infra/airflow/   Dockerfile, docker-compose.yaml, DAGs, Airflow ops README
+bi/              Power BI Project (PBIP): TMDL semantic model + PBIR report
 tests/           unit + integration pytest suites
 docs/            pipeline.md, data_contracts.md, troubleshooting.md
 ```

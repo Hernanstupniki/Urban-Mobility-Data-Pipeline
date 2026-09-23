@@ -5,7 +5,7 @@
 infra/airflow/logs/
 src/bronze/test_bronze.py
 src/silver/test_silver.py
-tmp/check_scd2.py
+tmp/
 .env
 **/.env
 __pycache__/

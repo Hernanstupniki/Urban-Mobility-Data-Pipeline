@@ -1,0 +1,7 @@
+# Power BI Desktop local caches, credential-free machine state and scratch.
+.pbi/
+*.abf
+*.log
+Definition/*/msfxs/
+# official-schema cache downloaded by bi/validation/validate_schemas.py
+validation/.cache/
