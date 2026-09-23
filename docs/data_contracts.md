@@ -6,7 +6,7 @@ The OLTP generator must continue to emit controlled dirty data. Its rates are va
 
 Expected signals include null-like strings, missing optional values, whitespace/case noise, invalid contacts, spelling variants for vehicle types and currencies, semantically duplicated passengers and gateway payment retries, incomplete or outlying distances, distance in an incompatible trip status, temporal inversions and excessive delays, missing and out-of-range coordinates, driver/vehicle mismatch, high-precision numerics and accidental PII in `cancel_note`, rating comments and payment provider references.
 
-PostgreSQL date and numeric columns remain typed and constrained. The generator therefore does not force textual dates, decimal separators or negative numbers into `TIMESTAMPTZ`/`NUMERIC` columns merely to imitate CSV dirt; Silver keeps defensive casts and validity checks for legacy or alternate Bronze sources where those representations can actually occur.
+PostgreSQL date and numeric columns remain typed and constrained. The generator also stores `requested_at_source` as text with ISO, year-first slash, day-first slash, and invalid examples. Bronze keeps this text. Silver parses known formats as UTC, uses the parsed value only when it matches typed `requested_at`, and records `requested_at_was_normalized` or `requested_at_source_invalid`. A short, dated importer incident raises invalid date-text rates so quality trends expose a real source-system event while baseline anomalies remain independent. Invalid text cannot move a trip to another date. Silver standardizes passenger and driver name case and whitespace; Bronze keeps the original text. No personal names are published to Power BI.
 
 ## Bronze
 

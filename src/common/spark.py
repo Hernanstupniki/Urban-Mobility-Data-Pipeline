@@ -19,6 +19,7 @@ def build_spark(job_name: str) -> SparkSession:
         .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "768m"))
         .config("spark.executor.cores", os.getenv("SPARK_EXECUTOR_CORES", "1"))
         .config("spark.ui.port", os.getenv("SPARK_DRIVER_UI_PORT", "4040"))
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config(
             "spark.sql.catalog.spark_catalog",

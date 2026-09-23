@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS trips (
   status              trip_status NOT NULL DEFAULT 'requested',
 
   requested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  requested_at_source TEXT,
   accepted_at         TIMESTAMPTZ,
   started_at          TIMESTAMPTZ,
   ended_at            TIMESTAMPTZ,

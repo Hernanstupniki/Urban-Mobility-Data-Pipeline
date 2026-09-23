@@ -11,6 +11,7 @@ from pyspark.sql.window import Window
 from delta.tables import DeltaTable
 
 from src.common.spark import build_spark
+from src.common.spark_normalization import normalized_person_name
 
 # Config
 JOB_NAME = "drivers_bronze_to_silver"
@@ -124,7 +125,7 @@ def main():
             # Ids
             .withColumn("driver_id", col("driver_id").cast("long"))
             # Strings
-            .withColumn("full_name", trim(col("full_name")))
+            .withColumn("full_name", normalized_person_name(col("full_name")))
             .withColumn("license_number", trim(col("license_number")))
             # status normalizado
             .withColumn("status", lower(trim(col("status"))))

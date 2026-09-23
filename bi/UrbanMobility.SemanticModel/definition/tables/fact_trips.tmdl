@@ -93,6 +93,16 @@ table fact_trips
 		displayFolder: "Data Quality"
 		sourceColumn: fare_amount_was_imputed
 
+	column requested_at_was_normalized
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: requested_at_was_normalized
+
+	column requested_at_source_invalid
+		dataType: boolean
+		displayFolder: "Data Quality"
+		sourceColumn: requested_at_source_invalid
+
 	column cancel_reason
 		dataType: string
 		summarizeBy: none
@@ -206,7 +216,7 @@ table fact_trips
 				    Source = PostgreSQL.Database("localhost:5433", "mobility_dw"),
 				    // Keep raw UTC timestamps; render business time as fixed UTC-3.
 				    // Compute the four derived columns in PostgreSQL during import.
-				    Trips = Value.NativeQuery(Source, "SELECT trip_id, status, requested_at, started_at, acceptance_delay_minutes, trip_duration_minutes, estimated_distance_km, actual_distance_km, fare_amount, fare_amount_analytical, fare_amount_was_imputed, is_distance_outlier, is_acceptance_delay_outlier, is_trip_duration_outlier, coordinates_missing, completed_but_ended_at_null, ended_before_started, driver_vehicle_mismatch, cancel_note_contains_potential_pii, cancel_reason, cancel_by, passenger_key, driver_key, vehicle_key, pickup_zone_key, dropoff_zone_key, request_date_key, dwh_loaded_at, started_at - make_interval(hours => 3) AS started_local, extract(hour from started_at - make_interval(hours => 3))::bigint AS started_hour, (requested_at - make_interval(hours => 3))::date::timestamp AS request_local_date, extract(hour from requested_at - make_interval(hours => 3))::bigint AS requested_local_hour FROM reporting.fact_trips", null, [EnableFolding = true])
+				    Trips = Value.NativeQuery(Source, "SELECT trip_id, status, requested_at, started_at, acceptance_delay_minutes, trip_duration_minutes, estimated_distance_km, actual_distance_km, fare_amount, fare_amount_analytical, fare_amount_was_imputed, requested_at_was_normalized, requested_at_source_invalid, is_distance_outlier, is_acceptance_delay_outlier, is_trip_duration_outlier, coordinates_missing, completed_but_ended_at_null, ended_before_started, driver_vehicle_mismatch, cancel_note_contains_potential_pii, cancel_reason, cancel_by, passenger_key, driver_key, vehicle_key, pickup_zone_key, dropoff_zone_key, request_date_key, dwh_loaded_at, started_at - make_interval(hours => 3) AS started_local, extract(hour from started_at - make_interval(hours => 3))::bigint AS started_hour, (requested_at - make_interval(hours => 3))::date::timestamp AS request_local_date, extract(hour from requested_at - make_interval(hours => 3))::bigint AS requested_local_hour FROM reporting.fact_trips", null, [EnableFolding = true])
 				in
 				    Trips
 

@@ -319,6 +319,7 @@ table _Measures
 				|| fact_trips[is_distance_outlier]
 				|| fact_trips[is_acceptance_delay_outlier]
 				|| fact_trips[is_trip_duration_outlier]
+				|| fact_trips[requested_at_source_invalid]
 			)
 			```
 		formatString: 0
@@ -334,6 +335,18 @@ table _Measures
 			1 - [DQ Issue Rate]
 			```
 		formatString: "0.0%"
+		displayFolder: "Data Quality"
+
+	measure 'Date Format Repairs' = ```
+			CALCULATE ( [Trips], fact_trips[requested_at_was_normalized] )
+			```
+		formatString: 0
+		displayFolder: "Data Quality"
+
+	measure 'Invalid Source Dates' = ```
+			CALCULATE ( [Trips], fact_trips[requested_at_source_invalid] )
+			```
+		formatString: 0
 		displayFolder: "Data Quality"
 
 	measure 'Coordinates Missing Rate' = ```

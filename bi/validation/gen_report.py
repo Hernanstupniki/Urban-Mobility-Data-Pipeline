@@ -182,7 +182,7 @@ pages["DataHealth"] = ("Data Health & Compliance", [
           [M("Data Trust Rate"), M("DQ Issue Trips"), M("Imputed Fare Rate"),
            M("Total Erased Subjects")]),
     visual("dq_trend", "lineChart", pos(28, 210, 1224, 220),
-           query=qs(Category=[column("dim_date", "date")], Y=[M("DQ Issue Trips")]),
+           query=qs(Category=[column("dim_date", "date")], Y=[M("DQ Issue Rate")]),
            title="How do quality issues change over time?"),
     visual("dq_matrix_compliance", "matrix", pos(28, 450, 600, 224),
            query=qs(Rows=[column("dim_driver", "status")],

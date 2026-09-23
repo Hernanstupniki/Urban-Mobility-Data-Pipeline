@@ -40,6 +40,7 @@ from mobility_model import (  # noqa: E402
     apply_passenger_dq,
     apply_vehicle_dq,
     in_incident_window,
+    requested_at_source_text,
 )
 from mobility_model import _clamp  # noqa: E402
 
@@ -1164,6 +1165,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids, model):
                 status,
 
                 requested_at,
+                requested_at_source,
                 accepted_at,
                 started_at,
                 ended_at,
@@ -1184,7 +1186,7 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids, model):
                 %s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
                 %s,
-                %s,%s,%s,%s,
+                %s,%s,%s,%s,%s,
                 %s,%s,%s,%s,
                 %s,%s,%s,
                 %s,%s
@@ -1203,6 +1205,9 @@ def insert_trips(cur, passenger_ids, driver_ids, vehicle_ids, zone_ids, model):
                 plan["status"],
 
                 plan["requested_at"],
+                requested_at_source_text(
+                    plan["requested_at"], in_incident_window(plan["requested_at"], model, "trip")
+                ),
                 plan["accepted_at"],
                 plan["started_at"],
                 plan["ended_at"],
@@ -1301,12 +1306,14 @@ def insert_ratings(cur, trip_ids, model):
 
     cur.execute(
         """
-        SELECT trip_id, passenger_id, driver_id, requested_at, accepted_at, started_at, ended_at
-        FROM mobility.trips
-        WHERE trip_id = ANY(%s)
-          AND driver_id IS NOT NULL
-          AND passenger_id IS NOT NULL
-          AND status = 'completed'
+        SELECT t.trip_id, t.passenger_id, t.driver_id, t.requested_at, t.accepted_at,
+               t.started_at, t.ended_at, v.vehicle_type
+        FROM mobility.trips t
+        LEFT JOIN mobility.vehicles v ON v.vehicle_id = t.vehicle_id
+        WHERE t.trip_id = ANY(%s)
+          AND t.driver_id IS NOT NULL
+          AND t.passenger_id IS NOT NULL
+          AND t.status = 'completed'
         """,
         (trip_ids,),
     )
@@ -1318,7 +1325,7 @@ def insert_ratings(cur, trip_ids, model):
 
     rated = random.sample(eligible, k=int(len(eligible) * 0.6))
 
-    for trip_id, passenger_id, driver_id, requested_at, accepted_at, started_at, ended_at in rated:
+    for trip_id, passenger_id, driver_id, requested_at, accepted_at, started_at, ended_at, vehicle_type in rated:
         delay_min = (
             (accepted_at - requested_at).total_seconds() / 60.0
             if accepted_at and requested_at else 0.0
@@ -1332,6 +1339,7 @@ def insert_ratings(cur, trip_ids, model):
             "delay_min": float(delay_min),
             "duration_min": float(duration_min),
             "requested_at": requested_at,
+            "vehicle_type": vehicle_type,
         }
         score = model.rating_score(plan_like)
         # noisy_rating_comment already applies presence + independent PII channels
@@ -1476,6 +1484,10 @@ def main():
     cur = conn.cursor()
 
     try:
+        if "requested_at_source" not in get_table_columns(cur, "trips"):
+            raise RuntimeError(
+                "Apply db/migrations/004_requested_at_source.sql before generating trips."
+            )
         zone_ids = fetch_ids(cur, "zones", "zone_id")
         if not zone_ids:
             raise RuntimeError("No zones found. Seed zones before running generator.")
