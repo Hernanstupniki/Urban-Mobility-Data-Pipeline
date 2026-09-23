@@ -192,7 +192,7 @@ pages["DataHealth"] = ("Data Health & Compliance", [
            query=qs(Values=[M("Last Gold Load")]), title="Last Gold load (UTC)"),
     textbox("dq_note", pos(928, 450, 324, 224), [
         {"value": "WHY QUALITY MATTERS", "textStyle": {"fontWeight": "bold", "fontSize": "12pt", "color": "#15253A"}},
-        {"value": "\nClean fare-distance correlation: 0.948. Across all records: about 0.68. Quality flags make apparent relationships less reliable.",
+        {"value": "\nQuality flags separate source errors from service behavior. Compare issue rates before interpreting demand, revenue or experience changes.",
          "textStyle": {"fontSize": "11pt", "color": "#516276"}},
         {"value": "\nUnknown driver = unassigned trip, not a data error. Date trends follow UTC calendar.",
          "textStyle": {"fontSize": "10pt", "color": "#516276"}},

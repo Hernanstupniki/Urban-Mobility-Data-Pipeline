@@ -167,27 +167,34 @@ guarantees).
 ## Validation (SQL ground truth vs dashboard)
 
 ### Global — `bash bi/validation/run_expected_metrics.sh`
-Baseline 2026-09-22 (post-SCD-rebuild) with **no filters on**, Power BI must reproduce:
+Snapshot 2026-09-23, after the controlled development regeneration and
+timezone-correct source-date replay, with **no filters on**. Run the SQL script
+again after any refresh; these are comparison values, not constants in DAX.
 
 | Measure | Value | Measure | Value |
 |---|---|---|---|
-| Trips | 48,000 | CompletionRate | 89.5% |
-| Completed | 42,982 | CollectionRate | 80.1% |
-| Cancelled | 5,003 | BillingGapPct | 11.69% |
-| Active | 15 | DataTrustRate | 78.0% |
-| MedianDelayMin | 5.1 | ImputedFareRate | 17.9% |
-| P90DelayMin | 20.9 | AverageRating | 4.03 |
-| GMV | $948,774 | FiveStarShare | 32.3% |
-| AnalyticalGMV | $1,120,471 | DQIssueTrips | 10,566 |
-| CollectedAmount | $897,541 | RevenueLeakageTrips | 9,703 |
-| BilledAmount | $1,120,737 | RevenueLeakageAmount | $192,027 |
-| DuplicatePaymentExposure | $0 | RatingCount | 25,669 |
-| UnknownDriverTrips | 0 | PIIRecordsRedacted | 2,053 |
-| ErasedSubjects | 5 | LastGoldLoad | 2026-09-22 04:14 UTC |
+| Trips | 48,000 | CompletionRate | 88.8% |
+| Completed | 42,601 | CollectionRate | 80.2% |
+| Cancelled | 5,095 | BillingGapPct | 11.69% |
+| Active | 304 | DataTrustRate | 75.9% |
+| MedianDelayMin | 5.0 | ImputedFareRate | 18.0% |
+| P90DelayMin | 20.9 | AverageRating | 3.97 |
+| GMV | $945,099 | FiveStarShare | 30.5% |
+| AnalyticalGMV | $1,117,560 | DQIssueTrips | 11,556 |
+| CollectedAmount | $898,732 | RevenueLeakageTrips | 9,526 |
+| BilledAmount | $1,121,023 | RevenueLeakageAmount | $186,364 |
+| DuplicatePaymentExposure | $0 | RatingCount | 25,560 |
+| DateFormatRepairs | 3,784 | InvalidSourceDates | 1,185 |
+| UnknownDriverTrips | 0 | PIIRecordsRedacted | 2,045 |
+| ErasedSubjects | 5 | LastGoldLoad | 2026-09-23 23:34 UTC |
 
-(Active = open-trip snapshot count at Gold build time; it is *not*
-CompletionRate's complement — cancelled+completed+requested∪accepted states,
-so 48,000 − 42,982 − 5,003 = 15. Interpreted as "currently in flight".)
+Active is the open-trip snapshot count (`requested`, `accepted`, `started`),
+not CompletionRate's complement by itself. The synthetic generator left 304
+recent trips open: 48,000 − 42,601 − 5,095. `DateFormatRepairs` counts valid
+text that Silver parsed and converted from Buenos Aires local time to UTC;
+`InvalidSourceDates` counts bad or inconsistent text where Silver retained
+the typed OLTP time. The four-day simulated importer incident drives the
+visible rise in the daily DQ rate.
 
 ### Filtered slices — `bash bi/validation/run_kpi_validation.sh`
 Reproduce each slicer state in Desktop (filter pane / slicer selection) and
@@ -196,11 +203,11 @@ compare. Rush hour = local 7–9 ∪ 17–20 ⇒ filter `requested_local_hour`
 
 | Slice | Trips | CompletionRate | Rating | Delay/amount |
 |---|---|---|---|---|
-| S1 `date=2026-09-19` (UTC) | 534 | 90.1% | 4.18 | P90 14.8 min |
-| S2 `Zone = Manhattan` (pickup) | 3,509 | 89.2% | — | GMV $63,605; avg duration 27.2 min |
-| S3 RUSH (local 7-9/17-20) | 16,496 | cancel 10.4% | — | median 6.9 / P90 26.6 min |
-| S4 `payment status paid ∩ Card` | — | — | — | collected $383,332 / billed $532,042 = 72.0% |
-| S5 `driver_id = 152` (busiest) | 120 | 90.0% | 4.05 | P90 19.4 min |
+| S1 `date=2026-09-19` (UTC) | 554 | 91.3% | 4.02 | P90 15.0 min |
+| S2 `Zone = Manhattan` (pickup) | 3,392 | 89.0% | — | GMV $61,258; avg duration 27.0 min |
+| S3 RUSH (local 7-9/17-20) | 16,575 | cancel 10.7% | — | median 6.9 / P90 27.4 min |
+| S4 `payment status paid ∩ Card` | — | — | — | collected $389,228 / billed $539,896 = 72.1% |
+| S5 `driver_id = 304` (busiest) | 127 | 90.6% | 4.00 | P90 18.8 min |
 
 Structural checks (headless): `python3 bi/validation/check_model.py`,
 `check_report.py`, `validate_schemas.py`, `gen_report.py`.

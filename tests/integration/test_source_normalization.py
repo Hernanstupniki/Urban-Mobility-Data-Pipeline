@@ -19,7 +19,7 @@ class SourceNormalizationTest(unittest.TestCase):
         cls.spark.stop()
 
     def test_names_and_dates(self):
-        typed = datetime(2026, 9, 2, 8, 30, 15)
+        typed = datetime(2026, 9, 2, 11, 30, 15)
         rows = [
             ("  michael   powell ", typed, "2026/09/02 08:30:15"),
             ("RACHEL SMITH", typed, "02/09/2026 08:30:15"),

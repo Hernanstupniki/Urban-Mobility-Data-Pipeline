@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 310" role="img" aria-label="Data-quality issue rate">
+<rect width="960" height="310" fill="#FFFFFF"/>
+<text x="44" y="38" text-anchor="start" fill="#17324A" font-family="Arial, sans-serif" font-size="21" font-weight="bold">Data-quality issue rate</text>
+<text x="44" y="59" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="12" font-weight="normal">Share of trips by request date (UTC calendar)</text>
+<line x1="67" y1="251.0" x2="924" y2="251.0" stroke="#DFE7EC"/>
+<text x="58" y="255.0" text-anchor="end" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">0%</text>
+<line x1="67" y1="210.2" x2="924" y2="210.2" stroke="#DFE7EC"/>
+<text x="58" y="214.25" text-anchor="end" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">13%</text>
+<line x1="67" y1="169.5" x2="924" y2="169.5" stroke="#DFE7EC"/>
+<text x="58" y="173.5" text-anchor="end" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">26%</text>
+<line x1="67" y1="128.8" x2="924" y2="128.8" stroke="#DFE7EC"/>
+<text x="58" y="132.75" text-anchor="end" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">39%</text>
+<line x1="67" y1="88.0" x2="924" y2="88.0" stroke="#DFE7EC"/>
+<text x="58" y="92.0" text-anchor="end" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">51%</text>
+<text x="67.0" y="271" text-anchor="middle" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Jun 26</text>
+<text x="278.8" y="271" text-anchor="middle" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Jul 18</text>
+<text x="500.3" y="271" text-anchor="middle" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Aug 10</text>
+<text x="712.2" y="271" text-anchor="middle" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Sep 01</text>
+<text x="924.0" y="271" text-anchor="middle" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Sep 23</text>
+<polyline points="67.0,179.3 76.6,181.2 86.3,187.8 95.9,178.1 105.5,172.4 115.1,166.8 124.8,193.2 134.4,184.4 144.0,180.6 153.7,177.7 163.3,178.4 172.9,169.2 182.6,186.2 192.2,174.6 201.8,180.9 211.4,183.9 221.1,174.6 230.7,176.2 240.3,195.0 250.0,164.4 259.6,177.3 269.2,172.8 278.8,181.2 288.5,180.4 298.1,165.0 307.7,173.6 317.4,178.8 327.0,168.9 336.6,179.5 346.2,186.2 355.9,174.3 365.5,191.3 375.1,172.9 384.8,185.2 394.4,166.7 404.0,183.7 413.7,182.9 423.3,179.1 432.9,174.3 442.5,177.3 452.2,167.2 461.8,173.3 471.4,175.5 481.1,182.2 490.7,181.4 500.3,165.2 509.9,160.7 519.6,163.5 529.2,164.8 538.8,164.3 548.5,121.4 558.1,134.6 567.7,106.8 577.3,119.1 587.0,180.6 596.6,184.2 606.2,166.0 615.9,188.3 625.5,172.3 635.1,184.7 644.8,182.4 654.4,177.7 664.0,174.3 673.6,170.1 683.3,179.5 692.9,179.3 702.5,180.1 712.2,183.3 721.8,181.1 731.4,171.2 741.0,179.2 750.7,183.5 760.3,171.4 769.9,172.8 779.6,187.3 789.2,185.0 798.8,177.0 808.4,179.6 818.1,179.8 827.7,176.4 837.3,170.3 847.0,178.4 856.6,175.4 866.2,177.5 875.9,183.0 885.5,179.0 895.1,177.0 904.7,175.2 914.4,181.4 924.0,179.3" fill="none" stroke="#087E78" stroke-width="2.5" stroke-linejoin="round"/>
+<polyline points="67.0,245.2 76.6,244.4 86.3,249.0 95.9,248.4 105.5,246.5 115.1,248.8 124.8,248.8 134.4,241.5 144.0,248.3 153.7,245.1 163.3,245.9 172.9,246.5 182.6,248.1 192.2,247.1 201.8,246.7 211.4,248.4 221.1,249.6 230.7,245.2 240.3,244.1 250.0,241.0 259.6,245.7 269.2,244.7 278.8,242.4 288.5,246.6 298.1,243.4 307.7,245.4 317.4,247.0 327.0,246.2 336.6,245.2 346.2,246.1 355.9,247.9 365.5,247.9 375.1,246.6 384.8,246.3 394.4,245.0 404.0,246.8 413.7,245.2 423.3,242.1 432.9,245.2 442.5,244.2 452.2,247.0 461.8,245.8 471.4,247.1 481.1,244.2 490.7,249.1 500.3,246.9 509.9,247.5 519.6,249.0 529.2,246.8 538.8,247.9 548.5,172.9 558.1,187.8 567.7,161.2 577.3,171.3 587.0,243.0 596.6,246.5 606.2,246.7 615.9,247.3 625.5,244.2 635.1,247.9 644.8,249.1 654.4,245.6 664.0,246.9 673.6,246.5 683.3,246.6 692.9,242.3 702.5,246.6 712.2,248.9 721.8,245.1 731.4,243.6 741.0,246.4 750.7,247.4 760.3,245.3 769.9,246.5 779.6,247.5 789.2,246.4 798.8,248.1 808.4,248.9 818.1,245.4 827.7,247.0 837.3,243.7 847.0,248.4 856.6,246.7 866.2,247.4 875.9,246.4 885.5,247.6 895.1,244.7 904.7,247.5 914.4,245.8 924.0,246.7" fill="none" stroke="#D58446" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="682" y1="53" x2="704" y2="53" stroke="#087E78" stroke-width="3"/>
+<text x="709" y="57" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Any issue</text>
+<line x1="802" y1="53" x2="824" y2="53" stroke="#D58446" stroke-width="3"/>
+<text x="829" y="57" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="11" font-weight="normal">Invalid date</text>
+<text x="44" y="298" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="10" font-weight="normal">Synthetic dev data · mobility_dw.reporting · 2026-09-23 UTC</text>
+</svg>

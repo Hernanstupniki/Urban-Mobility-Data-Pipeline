@@ -10,6 +10,7 @@ from pyspark.sql.functions import (
     regexp_replace,
     trim,
     try_to_timestamp,
+    to_utc_timestamp,
     unix_timestamp,
     upper,
     when,
@@ -24,7 +25,7 @@ def normalized_person_name(value):
 
 
 def normalize_requested_at_source(frame):
-    """Parse known UTC source formats and keep the typed time if text is bad."""
+    """Parse Buenos Aires wall time and keep typed UTC time if text is bad."""
     if "requested_at_source" not in frame.columns:
         frame = frame.withColumn("requested_at_source", lit(None).cast("string"))
     source = trim(col("requested_at_source"))
@@ -36,9 +37,10 @@ def normalize_requested_at_source(frame):
             "dd/MM/yyyy HH:mm:ss",
         )
     ))
+    parsed_utc = to_utc_timestamp(parsed, "America/Argentina/Buenos_Aires")
     typed = col("requested_at").cast("timestamp")
-    consistent = parsed.isNotNull() & typed.isNotNull() & (
-        spark_abs(unix_timestamp(parsed) - unix_timestamp(typed)) <= 1
+    consistent = parsed_utc.isNotNull() & typed.isNotNull() & (
+        spark_abs(unix_timestamp(parsed_utc) - unix_timestamp(typed)) <= 1
     )
     present = source.isNotNull() & (source != "")
     return (
@@ -50,5 +52,5 @@ def normalize_requested_at_source(frame):
             "requested_at_source_invalid",
             coalesce(present & ~consistent, lit(False)),
         )
-        .withColumn("requested_at", when(consistent, parsed).otherwise(typed))
+        .withColumn("requested_at", when(consistent, parsed_utc).otherwise(typed))
     )

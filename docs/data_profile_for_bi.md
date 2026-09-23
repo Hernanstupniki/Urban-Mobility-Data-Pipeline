@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-09-21. Source: `mobility_dw.reporting.*` (serving layer,
 reconciled with Gold). ~43,001 trips / 34,452 payments / 5,195 ratings.
-This documents the CURRENT synthetic data to justify the generator redesign.
+This is the historical pre-redesign baseline that justified the generator redesign. It does not describe the current synthetic dataset.
 All numbers below are reproducible with the SQL in each section.
 
 ## Executive summary
