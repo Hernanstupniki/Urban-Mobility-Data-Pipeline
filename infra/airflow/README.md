@@ -28,7 +28,7 @@ Use `docker compose stop` to stop services without deleting data. Rebuild the im
 | `dag_lakehouse_retention_vacuum` | Bronze and Silver retention, then Gold vacuum | Manual |
 | `dag_generate_mock_data` | Append synthetic OLTP data for tests | Manual only |
 
-The production branch schedules the three operational DAGs in `America/Asuncion`. The synthetic generator remains manual. See `dags/DAGS.md` for the branch schedule. Airflow's `spark_pool` has one slot, and each DAG limits active runs to protect the local Spark cluster. A trailing space after each `.sh` BashOperator command prevents Airflow from treating the command as a Jinja template path.
+The production branch schedules the three operational DAGs in `America/Argentina/Buenos_Aires`. The synthetic generator remains manual. See `dags/DAGS.md` for the branch schedule. Airflow's `spark_pool` has one slot, and each DAG limits active runs to protect the local Spark cluster. A trailing space after each `.sh` BashOperator command prevents Airflow from treating the command as a Jinja template path.
 
 ## Configuration
 

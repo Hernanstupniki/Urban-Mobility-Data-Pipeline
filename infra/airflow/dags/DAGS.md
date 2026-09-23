@@ -11,4 +11,4 @@ Airflow keeps business processing, erasure propagation, and retention in separat
 
 The operational DAGs use the same `spark_pool` slot so Spark jobs do not overlap. The pipeline publishes only after Gold succeeds. The GDPR DAG republishes after an erasure, so consumers do not wait for the next daily run. Retention stays separate from normal processing. `catchup=False` prevents historical automatic backfills when schedules are enabled.
 
-The DAG files remain the source of truth for exact schedule expressions. Use timezone-aware dates in `America/Asuncion` on the production branch and verify the next run times in Airflow before unpausing a DAG.
+The DAG files remain the source of truth for exact schedule expressions. Use timezone-aware dates in `America/Argentina/Buenos_Aires` on the production branch and verify the next run times in Airflow before unpausing a DAG.
