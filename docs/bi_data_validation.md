@@ -1,5 +1,7 @@
 # BI Data Validation — Before vs After (generator redesign)
 
+Historical validation snapshot. For current serving values, run `bi/validation/run_expected_metrics.sh` and inspect the charts in the root README.
+
 Date: 2026-09-21. Scope: FASE 3 deliverable — evidence that the synthetic
 dataset now carries plausible business structure while keeping deliberate,
 INDEPENDENT data-quality noise, full incremental semantics and end-to-end

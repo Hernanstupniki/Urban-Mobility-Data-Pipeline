@@ -40,10 +40,10 @@
                       "Entity": "_Measures"
                     }
                   },
-                  "Property": "DQ Issue Trips"
+                  "Property": "DQ Issue Rate"
                 }
               },
-              "queryRef": "_Measures.DQ Issue Trips"
+              "queryRef": "_Measures.DQ Issue Rate"
             }
           ]
         }

@@ -133,3 +133,58 @@ def test_payment_status_depends_on_method():
 def apply_one(name):
     return mm.maybe_pad(mm.maybe_upper(name, "dq_passenger_name_upper"),
                         "dq_passenger_name_pad")
+
+
+def test_source_dates_have_repairable_variants_and_invalid_cases():
+    _fresh(52)
+    from datetime import datetime
+    source_time = datetime(2026, 9, 2, 8, 30, 15)
+    values = [mm.requested_at_source_text(source_time) for _ in range(5000)]
+    assert sum(value.startswith("2026-09-02T") for value in values) > 4300
+    assert sum(value.startswith("2026/09/02 ") for value in values) > 50
+    assert sum(value.startswith("02/09/2026 ") for value in values) > 50
+    bad = {"not-a-date", "31/02/2026 09:00:00", "2026-13-01T09:00:00"}
+    assert sum(value in bad for value in values) > 35
+
+
+def test_importer_incident_is_visible_but_bounded():
+    _fresh(53)
+    from datetime import datetime
+    source_time = datetime(2026, 9, 2, 8, 30, 15)
+    bad = {"not-a-date", "31/02/2026 09:00:00", "2026-13-01T09:00:00"}
+    baseline = sum(mm.requested_at_source_text(source_time) in bad for _ in range(5000))
+    incident = sum(mm.requested_at_source_text(source_time, incident=True) in bad for _ in range(5000))
+    assert 40 < baseline < 120
+    assert 1000 < incident < 1500
+
+
+def test_vehicle_type_changes_ratings_without_fixing_outcomes():
+    model = mm.MobilityModel(ZONES)
+
+    def scores(vehicle_type):
+        return [model.rating_score({"quality": 0.0, "delay_min": 8.0,
+                                    "duration_min": 25.0, "requested_at": None,
+                                    "vehicle_type": vehicle_type},
+                                   rng=random.Random(i)) for i in range(3000)]
+
+    sedan = scores("sedan")
+    motorbike = scores("motorbike")
+    assert sum(sedan) / len(sedan) > sum(motorbike) / len(motorbike) + 0.2
+    assert len(set(sedan)) > 1 and len(set(motorbike)) > 1
+
+
+def test_driver_quality_changes_response_time_without_removing_noise():
+    _fresh(57)
+    model = mm.MobilityModel(ZONES)
+    qualities = [(model.driver_quality(driver_id, 57), driver_id) for driver_id in range(1, 201)]
+    slow_driver = min(qualities)[1]
+    fast_driver = max(qualities)[1]
+    day = model.day_date(30).replace(hour=8, minute=30)
+
+    def mean_delay(driver_id):
+        rng = random.Random(4321)
+        plans = [model.plan_trip([(driver_id, driver_id)], 30, day, 57, rng=rng)
+                 for _ in range(1500)]
+        return sum(plan["delay_min"] for plan in plans) / len(plans)
+
+    assert mean_delay(slow_driver) > mean_delay(fast_driver) + 1.0

@@ -52,7 +52,8 @@ TRIP_COLUMNS = [
     "ended_before_started", "start_coordinates_invalid", "end_coordinates_invalid", "coordinates_missing",
     "driver_vehicle_mismatch", "vehicle_driver_unverifiable", "acceptance_delay_minutes",
     "trip_duration_minutes", "is_acceptance_delay_outlier", "is_trip_duration_outlier",
-    "cancel_note_contains_potential_pii",
+    "cancel_note_contains_potential_pii", "requested_at_was_normalized",
+    "requested_at_source_invalid",
 ]
 
 PAYMENT_COLUMNS = [
@@ -157,7 +158,9 @@ def build_fact_trips() -> None:
             raise RuntimeError(f"Required Silver table not found: {source_path}")
         source = spark.read.format("delta").load(source_path)
         _require(source, TRIP_COLUMNS + ["is_current"], source_path)
-        fact = source.filter(col("is_current") == lit(True)).select(*TRIP_COLUMNS)
+        fact = source.filter(col("is_current") == lit(True)).select(*TRIP_COLUMNS).fillna(
+            False, subset=["requested_at_was_normalized", "requested_at_source_invalid"]
+        )
         fare_quantiles = fact.filter(col("fare_amount").isNotNull()).approxQuantile(
             "fare_amount", [0.5], 0.01
         )

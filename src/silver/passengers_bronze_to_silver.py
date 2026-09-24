@@ -12,6 +12,7 @@ from delta.tables import DeltaTable
 
 from src.common.data_quality import NULL_LIKE_VALUES
 from src.common.spark import build_spark
+from src.common.spark_normalization import normalized_person_name
 
 # Config
 JOB_NAME = "passengers_bronze_to_silver"
@@ -127,7 +128,7 @@ def main():
             # Ids
             .withColumn("passenger_id", col("passenger_id").cast("long"))
             # Strings
-            .withColumn("full_name", trim(col("full_name")))
+            .withColumn("full_name", normalized_person_name(col("full_name")))
             .withColumn("email", lower(trim(col("email"))))
             .withColumn("phone", trim(col("phone")))
             .withColumn("city", initcap(trim(col("city"))))

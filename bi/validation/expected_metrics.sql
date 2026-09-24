@@ -29,9 +29,11 @@ UNION ALL SELECT 'BillingGapPct', round((100.0*(sum(actual_distance_km) FILTER (
 UNION ALL SELECT 'RatingCount', count(*)::text FROM reporting.fact_ratings
 UNION ALL SELECT 'AverageRating', round(avg(score) FILTER (WHERE NOT score_invalid),2)::text FROM reporting.fact_ratings
 UNION ALL SELECT 'FiveStarShare', round(100.0*count(*) FILTER (WHERE score=5 AND NOT score_invalid)/count(*) FILTER (WHERE NOT score_invalid),1)::text||'%' FROM reporting.fact_ratings
-UNION ALL SELECT 'DQIssueTrips', count(*) FILTER (WHERE coordinates_missing OR completed_but_ended_at_null OR ended_before_started OR driver_vehicle_mismatch OR is_distance_outlier OR is_acceptance_delay_outlier OR is_trip_duration_outlier)::text FROM reporting.fact_trips
-UNION ALL SELECT 'DataTrustRate', round(100.0*(1-count(*) FILTER (WHERE coordinates_missing OR completed_but_ended_at_null OR ended_before_started OR driver_vehicle_mismatch OR is_distance_outlier OR is_acceptance_delay_outlier OR is_trip_duration_outlier)::numeric/count(*)),1)::text||'%' FROM reporting.fact_trips
+UNION ALL SELECT 'DQIssueTrips', count(*) FILTER (WHERE coordinates_missing OR completed_but_ended_at_null OR ended_before_started OR driver_vehicle_mismatch OR is_distance_outlier OR is_acceptance_delay_outlier OR is_trip_duration_outlier OR requested_at_source_invalid)::text FROM reporting.fact_trips
+UNION ALL SELECT 'DataTrustRate', round(100.0*(1-count(*) FILTER (WHERE coordinates_missing OR completed_but_ended_at_null OR ended_before_started OR driver_vehicle_mismatch OR is_distance_outlier OR is_acceptance_delay_outlier OR is_trip_duration_outlier OR requested_at_source_invalid)::numeric/count(*)),1)::text||'%' FROM reporting.fact_trips
 UNION ALL SELECT 'ImputedFareRate', round(100.0*count(*) FILTER (WHERE fare_amount_was_imputed)/count(*),1)::text||'%' FROM reporting.fact_trips
+UNION ALL SELECT 'DateFormatRepairs', count(*) FILTER (WHERE requested_at_was_normalized)::text FROM reporting.fact_trips
+UNION ALL SELECT 'InvalidSourceDates', count(*) FILTER (WHERE requested_at_source_invalid)::text FROM reporting.fact_trips
 UNION ALL SELECT 'UnknownDriverTrips', count(*) FILTER (WHERE driver_key=0)::text FROM reporting.fact_trips
 UNION ALL SELECT 'PIIRecordsRedacted', ((SELECT count(*) FROM reporting.fact_trips WHERE cancel_note_contains_potential_pii)+(SELECT count(*) FROM reporting.fact_ratings WHERE comment_contains_potential_pii)+(SELECT count(*) FROM reporting.fact_payments WHERE provider_ref_contains_potential_pii))::text
 UNION ALL SELECT 'ErasedSubjects', ((SELECT count(*) FROM reporting.dim_passenger WHERE is_deleted)+(SELECT count(*) FROM reporting.dim_driver WHERE is_deleted)+(SELECT count(*) FROM reporting.dim_vehicle WHERE is_deleted))::text

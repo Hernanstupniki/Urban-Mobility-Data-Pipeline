@@ -58,7 +58,9 @@ def run_bronze(entity: str, *, watermark_column: str = "updated_at") -> None:
             return
         row_count = output.count()
         new_watermark = output.select(spark_max(watermark_column)).first()[0]
-        output.write.format("delta").mode("append").partitionBy("load_date").save(target_path)
+        output.write.format("delta").mode("append").option(
+            "mergeSchema", "true" if entity == "trips" else "false"
+        ).partitionBy("load_date").save(target_path)
         record_status(spark, control_path, job_name, status="SUCCESS", watermark=new_watermark)
         log_event(job_name, "load", "SUCCESS", batch_id=batch_id, row_count=row_count, watermark=new_watermark, target=target_path)
     except Exception as exc:

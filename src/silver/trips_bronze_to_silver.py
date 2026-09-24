@@ -20,6 +20,7 @@ from src.common.data_quality import (
     PII_PHONE_PATTERN,
 )
 from src.common.spark import build_spark
+from src.common.spark_normalization import normalize_requested_at_source
 
 # Config
 JOB_NAME = "trips_bronze_to_silver"
@@ -116,6 +117,19 @@ def main():
     silver_exists = DeltaTable.isDeltaTable(spark, SILVER_BASE_PATH)
 
     try:
+        if silver_exists:
+            existing = set(spark.read.format("delta").load(SILVER_BASE_PATH).columns)
+            for name, data_type in (
+                ("requested_at_source", "STRING"),
+                ("requested_at_was_normalized", "BOOLEAN"),
+                ("requested_at_source_invalid", "BOOLEAN"),
+            ):
+                if name not in existing:
+                    spark.sql(
+                        f"ALTER TABLE delta.`{os.path.abspath(SILVER_BASE_PATH)}` "
+                        f"ADD COLUMNS ({name} {data_type})"
+                    )
+
         # 1) Watermark (raw_loaded_at) from Delta control table
         last_ts = read_last_loaded_ts(spark)
         print(f"[{JOB_NAME}] last_loaded_ts(raw_loaded_at): {last_ts}")
@@ -199,6 +213,8 @@ def main():
             .withColumn("batch_id", col("batch_id"))
         )
 
+
+        bronze_df = normalize_requested_at_source(bronze_df)
 
         # Debug / confirmation
         bronze_count = bronze_df.count()
@@ -383,6 +399,8 @@ def main():
 
                         coalesce(col("status").cast("string"), lit("")),
                         coalesce(col("requested_at").cast("string"), lit("")),
+                        coalesce(col("requested_at_was_normalized").cast("string"), lit("")),
+                        coalesce(col("requested_at_source_invalid").cast("string"), lit("")),
                         coalesce(col("accepted_at").cast("string"), lit("")),
                         coalesce(col("started_at").cast("string"), lit("")),
                         coalesce(col("ended_at").cast("string"), lit("")),
@@ -475,6 +493,9 @@ def main():
                 # Status + timestamps
                 "status": "s.status",
                 "requested_at": "s.requested_at",
+                "requested_at_source": "s.requested_at_source",
+                "requested_at_was_normalized": "s.requested_at_was_normalized",
+                "requested_at_source_invalid": "s.requested_at_source_invalid",
                 "accepted_at": "s.accepted_at",
                 "started_at": "s.started_at",
                 "ended_at": "s.ended_at",

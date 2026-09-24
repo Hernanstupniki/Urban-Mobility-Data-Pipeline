@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 282" role="img" aria-label="Average valid rating by vehicle type">
+<rect width="960" height="282" fill="#FFFFFF"/>
+<text x="44" y="38" text-anchor="start" fill="#17324A" font-family="Arial, sans-serif" font-size="21" font-weight="bold">Average valid rating by vehicle type</text>
+<text x="44" y="59" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="12" font-weight="normal">Valid ratings only; 1–5 scale</text>
+<text x="189" y="113" text-anchor="end" fill="#17324A" font-family="Arial, sans-serif" font-size="13" font-weight="normal">Sedan</text>
+<rect x="205" y="95" width="660" height="23" rx="4" fill="#EEF3F5"/>
+<rect x="205" y="95" width="569.6" height="23" rx="4" fill="#087E78"/>
+<text x="877" y="113" text-anchor="start" fill="#17324A" font-family="Arial, sans-serif" font-size="12" font-weight="bold">4.10</text>
+<text x="189" y="161" text-anchor="end" fill="#17324A" font-family="Arial, sans-serif" font-size="13" font-weight="normal">Hatchback</text>
+<rect x="205" y="143" width="660" height="23" rx="4" fill="#EEF3F5"/>
+<rect x="205" y="143" width="556.5" height="23" rx="4" fill="#087E78"/>
+<text x="877" y="161" text-anchor="start" fill="#17324A" font-family="Arial, sans-serif" font-size="12" font-weight="bold">4.02</text>
+<text x="189" y="209" text-anchor="end" fill="#17324A" font-family="Arial, sans-serif" font-size="13" font-weight="normal">Motorbike</text>
+<rect x="205" y="191" width="660" height="23" rx="4" fill="#EEF3F5"/>
+<rect x="205" y="191" width="511.7" height="23" rx="4" fill="#087E78"/>
+<text x="877" y="209" text-anchor="start" fill="#17324A" font-family="Arial, sans-serif" font-size="12" font-weight="bold">3.78</text>
+<text x="44" y="270" text-anchor="start" fill="#5F7182" font-family="Arial, sans-serif" font-size="10" font-weight="normal">Synthetic dev data · mobility_dw.reporting · 2026-09-23 UTC</text>
+</svg>

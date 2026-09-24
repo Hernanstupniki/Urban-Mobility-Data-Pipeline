@@ -16,10 +16,9 @@ Three explicit layers, never mixed:
    independent probabilities (verified by the 0/1/2/3+ anomaly-count
    distribution and the co-occurrence matrix in docs/bi_data_validation.md).
 
-3. INCIDENTS — the single deliberate exception to independence: a documented
-   source-system incident window (dates) where a small set of correlated
-   corruption keys fire together, so the dataset demonstrates both
-   "baseline DQ noise" and "simulated importer bug" scenarios.
+3. INCIDENTS — documented source-system incident windows where a small
+   set of corruption keys rise together. Baseline DQ trials stay independent
+   outside those windows.
 
 Determinism: consumes only the module-level ``random`` stream and the
 ``Faker`` instance passed in (both seeded once by the generator via
@@ -126,6 +125,8 @@ EVENTS = [
 INCIDENT_WINDOWS = [
     {"name": "importer_case_whitespace", "days": [50, 51, 52, 53],
      "entity": "passenger", "fields": ["full_name", "email"]},
+    {"name": "importer_date_format", "days": [50, 51, 52, 53],
+     "entity": "trip", "fields": ["requested_at_source"]},
 ]
 
 
@@ -246,11 +247,10 @@ class MobilityModel:
             * {"downtown": 1.25, "business": 1.2, "nightlife": 1.05, "airport": 1.1,
                "residential": 0.95, "leisure": 0.9}.get(role_o, 1.0)
 
-        delay_scale = max(0.8, 1.4 + 8.5 * congestion)
-        delay_min = _clamp(rng.expovariate(1.0 / delay_scale) + rng.gauss(0, 0.7), 0.3, 65.0)
-
         driver_id, vehicle_id = rng.choice(driver_vehicle_pairs) if driver_vehicle_pairs else (None, None)
         quality = self.driver_quality(driver_id, driver_seed) if driver_id else 0.0
+        delay_scale = max(0.8, (1.4 + 8.5 * congestion) * _clamp(1.0 - 0.16 * quality, 0.65, 1.35))
+        delay_min = _clamp(rng.expovariate(1.0 / delay_scale) + rng.gauss(0, 0.7), 0.3, 65.0)
 
         speed = _clamp(33.0 - 15.0 * congestion + rng.gauss(0, 4.5), 9.0, 62.0)
         duration_min = _clamp(est_km / speed * 60.0 + rng.gauss(0, 3.5), 4.0, 170.0)
@@ -320,6 +320,11 @@ class MobilityModel:
     # Ratings (business signal; independent of dq).
     def rating_score(self, plan, rng=random):
         mu = 4.42 + 0.55 * plan["quality"]
+        vehicle_type = str(plan.get("vehicle_type") or "").strip().lower()
+        if vehicle_type in {"motorbike", "motorcycle", "moto", "bike"}:
+            mu -= 0.32
+        elif vehicle_type in {"sedan", "saloon"}:
+            mu += 0.12
         mu -= min(1.9, 0.10 * max(0.0, plan["delay_min"] - 6.0))
         if plan["duration_min"] > 120:
             mu -= 0.35
@@ -379,6 +384,7 @@ DQ_RATES = {
     "dq_passenger_city_pad": 0.03,
     # drivers / vehicles
     "dq_driver_name_upper": 0.03,
+    "dq_driver_name_lower": 0.025,
     "dq_driver_name_pad": 0.04,
     "dq_license_lower": 0.05,
     "dq_license_pad": 0.03,
@@ -394,6 +400,8 @@ DQ_RATES = {
     "dq_note_empty": 0.015,
     # trips numeric/NULL channels (reused by generator legacy gates)
     "dq_trip_fare_null": 0.18,
+    "dq_trip_requested_at_alt_format": 0.08,
+    "dq_trip_requested_at_invalid": 0.015,
 }
 
 _NULLISH = ("NULL", "null", "N/A", "-", "None", "  NULL  ")
@@ -432,6 +440,17 @@ def maybe_invalid(value, key, kind, rng=random):
     return value
 
 
+def requested_at_source_text(value, incident=False, rng=random):
+    """Keep a raw timestamp representation for format-quality exercises."""
+    invalid_rate = 0.25 if incident else DQ_RATES["dq_trip_requested_at_invalid"]
+    if rng.random() < invalid_rate:
+        return rng.choice(("not-a-date", "31/02/2026 09:00:00", "2026-13-01T09:00:00"))
+    if rng.random() < DQ_RATES["dq_trip_requested_at_alt_format"]:
+        pattern = rng.choice(("%Y/%m/%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"))
+        return value.strftime(pattern)
+    return value.strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def apply_passenger_dq(name, email, phone, city, incident=False, rng=random):
     """Clean values in, independently-corrupted values out.
 
@@ -464,6 +483,7 @@ def apply_passenger_dq(name, email, phone, city, incident=False, rng=random):
 
 def apply_driver_dq(name, license_number, rng=random):
     name = maybe_upper(name, "dq_driver_name_upper", rng)
+    name = maybe_lower(name, "dq_driver_name_lower", rng)
     name = maybe_pad(name, "dq_driver_name_pad", rng)
     license_number = maybe_lower(license_number, "dq_license_lower", rng)
     license_number = maybe_pad(license_number, "dq_license_pad", rng)
@@ -494,6 +514,6 @@ def apply_note_dq(base_note, rng=random):
     return note
 
 
-def in_incident_window(created_dt, model):
+def in_incident_window(created_dt, model, entity="passenger"):
     day_idx = model.window_days - 1 - (model.end.date() - created_dt.date()).days
-    return any(inc["entity"] == "passenger" and day_idx in inc["days"] for inc in INCIDENT_WINDOWS)
+    return any(inc["entity"] == entity and day_idx in inc["days"] for inc in INCIDENT_WINDOWS)
